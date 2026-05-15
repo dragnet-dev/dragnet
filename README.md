@@ -59,7 +59,7 @@ cargo / maven registries · MITRE ATT&CK · Trivy DB · Hugging Face ·
 AttackerKB · deps.dev · Snyk · VulnCheck · Docker Hub · ransomware.live ·
 ~30 vendor security blogs.
 
-Some sources require API keys — set them in the environment:
+Some sources require API keys; set them in the environment:
 
 | Variable               | Source                  |
 |------------------------|-------------------------|
@@ -101,7 +101,7 @@ a real `index.json` through the TS types to catch drift.
 ```bash
 go build ./...
 go test  ./...
-go build -o dragnet .         # the CLI binary (gitignored — `make` it locally or grab a release)
+go build -o dragnet .         # the CLI binary (gitignored; `make` it locally or grab a release)
 ```
 
 The compiled binary is **never committed**; release artefacts come from
@@ -116,7 +116,7 @@ windows/amd64).
 locally for dev runs. The live config used by `haul`'s sync workflow lives
 at [`dragnet-dev/haul/dragnet.yaml`](https://github.com/dragnet-dev/haul/blob/main/dragnet.yaml).
 
-`dragnet.yaml` itself is gitignored — only `.example` ships from this repo.
+`dragnet.yaml` itself is gitignored; only `.example` ships from this repo.
 
 ---
 
@@ -162,4 +162,4 @@ schema/      JSON Schema for incidents (embed.go vendored at runtime)
 
 ## License
 
-MIT — see [LICENSE](./LICENSE).
+MIT. See [LICENSE](./LICENSE).
