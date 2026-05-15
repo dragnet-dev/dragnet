@@ -90,6 +90,9 @@ func (c *Client) Fetch(ctx context.Context, since time.Time) ([]*incident.Incide
 func (c *Client) fetchBulk(ctx context.Context, since time.Time) ([]*incident.Incident, error) {
 	var all []*incident.Incident
 	for _, eco := range bulkEcosystems {
+		if err := ctx.Err(); err != nil {
+			return all, err
+		}
 		incs, err := c.fetchEcosystem(ctx, eco, since)
 		if err != nil {
 			log.Printf("[osv] bulk %s: %v (skipping)", eco, err)
@@ -147,7 +150,15 @@ func (c *Client) fetchEcosystem(ctx context.Context, eco string, since time.Time
 	}
 
 	var incs []*incident.Incident
-	for _, f := range zr.File {
+	// The npm/pypi all.zip files contain tens of thousands of JSON entries.
+	// Check ctx every 256 files so a cancelled context exits the parse loop
+	// promptly instead of churning for minutes after the parent ctx died.
+	for i, f := range zr.File {
+		if i&0xff == 0 {
+			if err := ctx.Err(); err != nil {
+				return incs, err
+			}
+		}
 		if !strings.HasSuffix(f.Name, ".json") {
 			continue
 		}
@@ -215,6 +226,9 @@ func (c *Client) EnrichPackages(ctx context.Context, pkgs []incident.Package) ([
 	var all []*incident.Incident
 
 	for i := 0; i < len(queries); i += batchSize {
+		if err := ctx.Err(); err != nil {
+			return all, err
+		}
 		end := i + batchSize
 		if end > len(queries) {
 			end = len(queries)

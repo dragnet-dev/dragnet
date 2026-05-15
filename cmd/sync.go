@@ -32,6 +32,17 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// perSourceFetchTimeout caps each source's individual Fetch() call. Used to
+// build the per-source context, but several sources have local processing
+// loops that don't honour ctx.Done(); allSourcesDeadline below is the hard
+// safety net for those.
+const perSourceFetchTimeout = 90 * time.Second
+
+// allSourcesDeadline is the absolute wall-clock budget for the parallel-fetch
+// stage of one module. After this, the wg.Wait() bails out, abandons any
+// still-running goroutines, and proceeds with whatever was collected.
+const allSourcesDeadline = 5 * time.Minute
+
 var syncCmd = &cobra.Command{
 	Use:   "sync",
 	Short: "Poll intelligence sources and update rules for one or all modules",
@@ -192,6 +203,7 @@ func runSync(_ *cobra.Command, _ []string) error {
 			incidents     []*incident.Incident
 			fetchErrCount int32
 			wg            sync.WaitGroup
+			pending       sync.Map // src.Name() -> struct{} for any source still running
 		)
 		sem := make(chan struct{}, 10)
 		for _, src := range srcs {
@@ -200,8 +212,10 @@ func runSync(_ *cobra.Command, _ []string) error {
 				defer wg.Done()
 				sem <- struct{}{}
 				defer func() { <-sem }()
+				pending.Store(s.Name(), struct{}{})
+				defer pending.Delete(s.Name())
 				log.Printf("[sync][%s] fetching %s since %s", modName, s.Name(), since.Format(time.RFC3339))
-				fetchCtx, fetchCancel := context.WithTimeout(ctx, 2*time.Minute)
+				fetchCtx, fetchCancel := context.WithTimeout(ctx, perSourceFetchTimeout)
 				got, err := s.Fetch(fetchCtx, since)
 				fetchCancel()
 				if err != nil {
@@ -214,7 +228,26 @@ func runSync(_ *cobra.Command, _ []string) error {
 				mu.Unlock()
 			}(src)
 		}
-		wg.Wait()
+
+		// Hard wait deadline. Some sources have local processing loops that
+		// don't honour ctx.Done(), so wg.Wait() alone can hang forever even
+		// after every per-fetch context has been cancelled. After
+		// allSourcesDeadline, abandon any still-running goroutines and
+		// proceed with whatever incidents have been collected so far.
+		done := make(chan struct{})
+		go func() { wg.Wait(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(allSourcesDeadline):
+			var stuck []string
+			pending.Range(func(k, _ any) bool {
+				stuck = append(stuck, k.(string))
+				return true
+			})
+			log.Printf("[sync][%s] hit %s deadline; abandoning %d source(s) still running: %s",
+				modName, allSourcesDeadline, len(stuck), strings.Join(stuck, ", "))
+			atomic.AddInt32(&fetchErrCount, int32(len(stuck)))
+		}
 
 		// OSV package enrichment for the supply module.
 		if modName == "supply" {

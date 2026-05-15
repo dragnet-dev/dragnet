@@ -28,11 +28,26 @@ func (c *Client) Name() string { return "ossf" }
 func (c *Client) Fetch(ctx context.Context, since time.Time) ([]*incident.Incident, error) {
 	dir := cacheDir
 	if err := cloneOrPull(ctx, dir); err != nil {
+		// If the clone was cancelled mid-flight the cache dir is half-populated;
+		// remove it so the next run starts clean instead of trying to git-fetch
+		// an inconsistent shallow clone.
+		if ctx.Err() != nil {
+			_ = os.RemoveAll(dir)
+		}
 		return nil, err
 	}
 
 	var incidents []*incident.Incident
+	visited := 0
 	err := filepath.WalkDir(filepath.Join(dir, "osv"), func(path string, d fs.DirEntry, err error) error {
+		// Honour ctx cancellation every 256 entries so a cancelled parent
+		// stops the walk promptly instead of plowing through ~5k JSON files.
+		visited++
+		if visited&0xff == 0 {
+			if cerr := ctx.Err(); cerr != nil {
+				return cerr
+			}
+		}
 		if err != nil {
 			return nil // skip unreadable entries
 		}
