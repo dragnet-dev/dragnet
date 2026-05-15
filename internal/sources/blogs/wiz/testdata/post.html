@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html>
+<head><title>Wiz Blog - Malicious npm Package</title></head>
+<body>
+<article>
+  <h1>Malicious npm Package Steals Credentials</h1>
+  <p>Our researchers discovered a malicious npm package targeting developers.</p>
+
+  <h2>Indicators of compromise</h2>
+
+  <h3>@cap-js/postgres 2.2.2</h3>
+  <table>
+    <thead>
+      <tr><th>File</th><th>Hash</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>router_init.js</td><td>ab4fcadaec1d282b900de5abb5b1d55dbd0e7af9628f6e7a5e2cb0e68b3b56aa</td></tr>
+      <tr><td>router_init.js</td><td>12ed9a3cab1b2e3d4f5a6b7c8d9e0f1a2b3c4d5e</td></tr>
+      <tr><td>router_init.js</td><td>833fd59e4b3c2a1d5e6f7a8b9c0d1234</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Network Indicators</h3>
+  <table>
+    <thead>
+      <tr><th>Type</th><th>Indicator</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>C2 Domain</td><td>git-tanstack.com</td></tr>
+      <tr><td>C2 IP</td><td>83.142.209.194</td></tr>
+      <tr><td>Payload URL</td><td>http://git-tanstack.com/payload.sh</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Additional Indicators</h3>
+  <table>
+    <thead>
+      <tr><th>Type</th><th>Indicator</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Service Name</td><td>gh-token-monitor</td></tr>
+      <tr><td>macOS Persistence</td><td>~/Library/LaunchAgents/com.apple.ghmonitor.plist</td></tr>
+      <tr><td>Linux Persistence</td><td>/etc/systemd/system/gh-monitor.service</td></tr>
+      <tr><td>Runtime Artifact</td><td>tanstack_runner.js</td></tr>
+      <tr><td>Path</td><td>~/.vscode/extensions/tanstack.extension</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Conclusion</h2>
+  <p>Organizations should audit their npm dependencies immediately.</p>
+</article>
+</body>
+</html>

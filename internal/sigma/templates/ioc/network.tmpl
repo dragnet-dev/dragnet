@@ -1,0 +1,64 @@
+{{- if eq .Module "cve"}}
+title: 'Dragnet [CVE/IOC]: {{.DragnetID}} — Exploitation Network Indicator ({{.CVEID}})'
+{{- else if eq .Module "malware"}}
+title: 'Dragnet [Malware/IOC]: {{.DragnetID}} — Malware C2 Communication'
+{{- else if eq .Module "ransomware"}}
+title: 'Dragnet [Ransomware/IOC]: {{.DragnetID}} — Ransomware C2 Communication'
+{{- else}}
+title: 'Dragnet [IOC]: {{.DragnetID}} — C2 Network Communication'
+{{- end}}
+id: {{.ID}}
+status: {{.Status}}
+description: |
+{{- if eq .Module "cve"}}
+  Detects network communication associated with exploitation or post-exploitation activity for {{.CVEID}}.
+{{- else if eq .Module "malware"}}
+  Detects network connections to known malware C2 infrastructure.
+{{- else if eq .Module "ransomware"}}
+  Detects network connections to known ransomware operator infrastructure.
+{{- else}}
+  Detects network connections to known C2 infrastructure associated with a supply chain incident.
+{{- end}}
+  Incident: {{.DragnetID}}
+  {{.Description}}
+references:
+{{- range .References}}
+  - {{.}}
+{{- end}}
+author: dragnet-bot
+date: {{.Date}}
+tags:
+  - attack.t1071.001
+  - attack.t1041
+{{- range .Tags}}
+  - {{.}}
+{{- end}}
+logsource:
+  category: network_connection
+  product: any
+detection:
+{{- if .Domains}}
+  selection_domain:
+    DestinationHostname|contains:
+{{- range .Domains}}
+      - '{{.Value}}'
+{{- end}}
+{{- end}}
+{{- if .IPs}}
+  selection_ip:
+    DestinationIp|contains:
+{{- range .IPs}}
+      - '{{.Value}}'
+{{- end}}
+{{- end}}
+{{- if .URLs}}
+  selection_url:
+    DestinationHostname|contains:
+{{- range .URLs}}
+      - '{{.Value}}'
+{{- end}}
+{{- end}}
+  condition: {{networkCondition .}}
+falsepositives:
+  - Legitimate traffic to shared infrastructure
+level: {{.Level}}

@@ -1,0 +1,159 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/dragnet-dev/dragnet/schema/incident.schema.json",
+  "title": "Dragnet Incident",
+  "type": "object",
+  "required": ["id", "attack_type", "severity", "description", "references"],
+  "additionalProperties": true,
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^(npm|pypi|cargo|nuget|rubygems|go|maven|hex|packagist|pub|malware|ransomware|cve|vuln|container(-[a-z0-9]+)?)-[0-9]{4}-[0-9]{3,}$",
+      "description": "Canonical incident ID: {type}-{year}-{seq}"
+    },
+    "osv_id":  { "type": "string" },
+    "ghsa_id": { "type": "string" },
+    "packages": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["name", "ecosystem"],
+        "properties": {
+          "name":      { "type": "string" },
+          "ecosystem": {
+            "type": "string",
+            "enum": ["npm", "pypi", "cargo", "nuget", "rubygems", "go", "maven", "hex", "packagist", "pub", "github-actions", "huggingface"]
+          },
+          "affected_versions": {
+            "type": "array",
+            "items": { "type": "string" }
+          }
+        }
+      }
+    },
+    "attack_type": {
+      "type": "string",
+      "enum": [
+        "account_takeover",
+        "typosquat",
+        "dep_confusion",
+        "poisoned_maintainer",
+        "malicious_publish",
+        "ci_poisoning",
+        "namespace_squatting",
+        "vulnerability",
+        "exploit",
+        "ransomware",
+        "container_vulnerability",
+        "eol",
+        "model_poisoning"
+      ]
+    },
+    "severity": {
+      "type": "string",
+      "enum": ["critical", "high", "medium", "low"]
+    },
+    "compromise_window": {
+      "type": "object",
+      "properties": {
+        "start": { "type": "string", "format": "date-time" },
+        "end":   { "type": "string", "format": "date-time" }
+      }
+    },
+    "campaign": {
+      "type": "object",
+      "properties": {
+        "name":       { "type": "string" },
+        "actor":      { "type": "string" },
+        "confidence": { "type": "string", "enum": ["low", "medium", "high"] }
+      }
+    },
+    "description": { "type": "string", "minLength": 10 },
+    "references": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "format": "uri" }
+    },
+    "exposure":   { "type": "object" },
+    "indicators": {
+      "type": "object",
+      "properties": {
+        "workflow_indicators": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["type", "value"],
+            "properties": {
+              "type":       { "type": "string", "enum": ["exfil_pattern", "malicious_step", "env_access"] },
+              "value":      { "type": "string" },
+              "sources":    { "type": "array", "items": { "type": "string" } },
+              "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+            }
+          }
+        },
+        "model_indicators": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["type"],
+            "properties": {
+              "type":        { "type": "string", "enum": ["format_downgrade", "unexpected_binary", "malicious_model_card"] },
+              "filename":    { "type": "string" },
+              "value":       { "type": "string" },
+              "description": { "type": "string" },
+              "sources":     { "type": "array", "items": { "type": "string" } },
+              "confidence":  { "type": "number", "minimum": 0, "maximum": 1 }
+            }
+          }
+        }
+      }
+    },
+    "hunting":    { "type": "object" },
+    "detection_targets": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": ["network", "process", "file", "persistence"]
+      }
+    },
+    "container_ext": {
+      "type": "object",
+      "properties": {
+        "affected_images": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["repository", "vulnerable_tags"],
+            "properties": {
+              "repository":     { "type": "string" },
+              "os_family":      { "type": "string", "enum": ["alpine", "debian", "ubuntu", "rhel", "amazon"] },
+              "vulnerable_tags": { "type": "array", "items": { "type": "string" } },
+              "fixed_tag":      { "type": "string" },
+              "cve_ids":        { "type": "array", "items": { "type": "string" } },
+              "confidence":     { "type": "number", "minimum": 0, "maximum": 1 },
+              "sources":        { "type": "array", "items": { "type": "string" } }
+            }
+          }
+        },
+        "eol_images": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["repository", "cycle", "eol_date"],
+            "properties": {
+              "repository":  { "type": "string" },
+              "cycle":       { "type": "string" },
+              "eol_date":    { "type": "string" },
+              "replacement": { "type": "string" }
+            }
+          }
+        },
+        "cvss_score":        { "type": "number", "minimum": 0, "maximum": 10 },
+        "exploited_in_wild": { "type": "boolean" },
+        "public_poc":        { "type": "boolean" },
+        "tier":              { "type": "integer", "minimum": 1, "maximum": 3 }
+      }
+    }
+  }
+}

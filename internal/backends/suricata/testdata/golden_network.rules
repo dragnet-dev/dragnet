@@ -1,0 +1,4 @@
+# Dragnet [IOC]: npm-2026-001 — C2 Network Communication
+# Status: stable | Level: critical | ID: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+alert dns any any -> any any (msg:"Dragnet [IOC]: npm-2026-001 — C2 Network Communication [git-tanstack.com]"; dns.query; content:"git-tanstack.com"; nocase; classtype:trojan-activity; sid:4847316; rev:1;)
+alert ip any any -> 83.142.209.194 any (msg:"Dragnet [IOC]: npm-2026-001 — C2 Network Communication [83.142.209.194]"; classtype:trojan-activity; sid:4847317; rev:1;)

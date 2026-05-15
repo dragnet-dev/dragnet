@@ -1,0 +1,15 @@
+rule dragnet_ioc_npm_2026_002_malicious_file_hash_34567891 {
+  meta:
+    author = "dragnet-bot"
+    description = "Detection of malicious file by SHA256 hash.\n"
+    severity = "HIGH"
+    rule_id = "b2c3d4e5-f6a7-8901-bcde-f01234567891"
+    sigma_status = "stable"
+
+  events:
+    $e.metadata.event_type = "FILE_CREATION"
+    $e.target.file.sha256 = "ab4fcadaec3a4b0f0f5e96a8c8c23e2f1d0a9b8c7d6e5f4a3b2c1d0e9f8a7b6"
+
+  condition:
+    $e
+}

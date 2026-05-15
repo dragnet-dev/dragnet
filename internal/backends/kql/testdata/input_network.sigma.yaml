@@ -1,0 +1,19 @@
+title: 'Dragnet [IOC]: npm-2026-001 — C2 Network Communication'
+id: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+status: stable
+description: |
+  Network communication to Mini Shai-Hulud C2 infrastructure.
+logsource:
+  category: network_connection
+  product: any
+detection:
+  selection_domain:
+    DestinationHostname|contains:
+      - 'git-tanstack.com'
+  selection_ip:
+    DestinationIp|contains:
+      - '83.142.209.194'
+  condition: selection_domain or selection_ip
+level: critical
+tags:
+  - attack.t1041

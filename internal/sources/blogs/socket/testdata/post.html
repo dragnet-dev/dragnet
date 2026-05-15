@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html>
+<head><title>Socket Blog - Malicious Package Report</title></head>
+<body>
+<article>
+  <h1>New Malicious npm Package Discovered</h1>
+  <p>Socket researchers have identified a supply chain attack targeting developers.</p>
+
+  <h2>Indicators of Compromise (IOCs)</h2>
+
+  <h3>Files</h3>
+  <p>
+    <b>router_init.js</b>
+    - SHA256 ab4fcadaec1d282b900de5abb5b1d55dbd0e7af9628f6e7a5e2cb0e68b3b56aa
+    - SHA1 12ed9a3cab1b2e3d4f5a6b7c8d9e0f1a2b3c4d5e
+    - MD5 833fd59e4b3c2a1d5e6f7a8b9c0d1234
+  </p>
+  <p>
+    <b>tanstack_runner.js</b>
+    - SHA256 2ec78d55aabbccdd11223344aabbccdd11223344aabbccdd11223344aabbccdd1a
+    - SHA1 aabbccdd11223344aabbccdd11223344aabbccdd
+    - MD5 aabbccdd11223344aabbccdd11223344
+  </p>
+
+  <h3>Network</h3>
+  <p>
+    hxxp://filev2[.]getsession[.]org/file/payload.sh
+    hxxps://cdn[.]evil[.]example[.]com/stage2.bin
+    169[.]254[.]169[.]254 (DO NOT BLOCK)
+    83[.]142[.]209[.]194
+    malware-c2[.]example[.]com
+  </p>
+
+  <h2>Conclusion</h2>
+  <p>Remove these packages immediately.</p>
+</article>
+</body>
+</html>

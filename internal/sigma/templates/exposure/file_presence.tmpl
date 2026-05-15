@@ -1,0 +1,31 @@
+title: 'Dragnet [Exposure]: {{.DragnetID}} — Malicious File Presence Detected'
+id: {{.ID}}
+status: {{.Status}}
+description: |
+  Detects runtime presence of files dropped or modified by a known-compromised package.
+  Incident: {{.DragnetID}}
+  {{.Description}}
+references:
+{{- range .References}}
+  - {{.}}
+{{- end}}
+author: dragnet-bot
+date: {{.Date}}
+tags:
+  - attack.t1195.002
+{{- range .Tags}}
+  - {{.}}
+{{- end}}
+logsource:
+  category: file_event
+  product: any
+detection:
+  selection:
+    TargetFilename|contains:
+{{- range .FilePresence}}
+      - '{{.}}'
+{{- end}}
+  condition: selection
+falsepositives:
+  - Legitimate files with similar names in unrelated projects
+level: {{.Level}}

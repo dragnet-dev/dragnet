@@ -1,0 +1,6 @@
+| comment "Dragnet [IOC]: npm-2026-001 — C2 Network Communication"
+| comment "Status: stable | Level: critical | ID: a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+index=* sourcetype=network*
+| where (dest="*git-tanstack.com*") OR (dest_ip="*83.142.209.194*")
+| table _time, src, dest, dest_ip, process
+| head 1000

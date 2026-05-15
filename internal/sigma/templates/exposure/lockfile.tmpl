@@ -1,0 +1,31 @@
+title: 'Dragnet [Exposure]: {{.DragnetID}} — Affected Package in Lockfile'
+id: {{.ID}}
+status: {{.Status}}
+description: |
+  Detects presence of a known-compromised package version in dependency lockfiles.
+  Incident: {{.DragnetID}}
+  {{.Description}}
+references:
+{{- range .References}}
+  - {{.}}
+{{- end}}
+author: dragnet-bot
+date: {{.Date}}
+tags:
+  - attack.t1195.002
+{{- range .Tags}}
+  - {{.}}
+{{- end}}
+logsource:
+  category: file_event
+  product: any
+detection:
+  selection:
+    TargetFilename|contains:
+{{- range .LockfileSignatures}}
+      - '{{.}}'
+{{- end}}
+  condition: selection
+falsepositives:
+  - Legitimate use of affected package version before compromise was known
+level: {{.Level}}

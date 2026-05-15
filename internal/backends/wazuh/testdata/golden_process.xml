@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<group name="dragnet,supply_chain">
+  <!-- Dragnet [Hunt]: npm-2026-003 — Suspicious Process Access | Status: experimental | Sigma ID: c3d4e5f6-a7b8-9012-cdef-012345678902 -->
+  <rule id="570385" level="8">
+    <description>Dragnet [Hunt]: npm-2026-003 — Suspicious Process Access</description>
+    <field name="process.args" type="pcre2">/proc/</field>
+    <field name="process.name" type="pcre2">node</field>
+  </rule>
+</group>

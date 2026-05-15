@@ -1,0 +1,16 @@
+title: 'Dragnet [Hunt]: npm-2026-003 — Suspicious Process Access'
+id: c3d4e5f6-a7b8-9012-cdef-012345678902
+status: experimental
+description: |
+  Suspicious node process accessing /proc/ filesystem.
+logsource:
+  category: process_creation
+  product: linux
+detection:
+  selection:
+    Image|contains:
+      - 'node'
+    CommandLine|contains:
+      - '/proc/'
+  condition: selection
+level: medium

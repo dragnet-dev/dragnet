@@ -1,0 +1,47 @@
+title: 'Dragnet [Hunt]: {{.DragnetID}} — {{.Behaviour.ID}} Destructive Command Executed by Package Daemon'
+id: {{.ID}}
+status: {{.Status}}
+description: |
+  Detects destructive commands (rm -rf, shred, wipe) executed by processes spawned from
+  package manager scripts or daemons installed by a compromised package.
+  Behaviour: {{.Behaviour.ID}} — {{.Behaviour.Description}}
+  Incident: {{.DragnetID}}
+  {{.Description}}
+references:
+{{- range .References}}
+  - {{.}}
+{{- end}}
+author: dragnet-bot
+date: {{.Date}}
+tags:
+  - attack.t1485
+  - attack.t1070.004
+{{- range .Tags}}
+  - {{.}}
+{{- end}}
+logsource:
+  category: process_creation
+  product: linux
+detection:
+  selection_rm:
+    Image|endswith:
+      - '/rm'
+      - '/shred'
+    CommandLine|contains:
+      - '-rf'
+      - '-fr'
+      - '--force'
+    ParentImage|contains:
+      - 'node'
+      - 'npm'
+      - 'bash'
+      - 'sh'
+  selection_shred:
+    Image|endswith: '/shred'
+    ParentImage|contains:
+      - 'node'
+      - 'npm'
+  condition: selection_rm or selection_shred
+falsepositives:
+  - Legitimate cleanup scripts in package postinstall hooks
+level: {{.Level}}

@@ -1,0 +1,6 @@
+// Dragnet [Hunt]: npm-2026-003 — Suspicious Process Access
+// Status: experimental | Level: medium | ID: c3d4e5f6-a7b8-9012-cdef-012345678902
+
+process where
+  (process.command_line like~ "*/proc/*") and
+  (process.executable like~ "*node*")

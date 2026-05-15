@@ -1,0 +1,1 @@
+# Snort: rule "Dragnet [Hunt]: npm-2026-003 — Suspicious Process Access" (ID: c3d4e5f6-a7b8-9012-cdef-012345678902) targets "process_creation" — no network rule generated

@@ -1,0 +1,270 @@
+modules:
+
+  supply:
+    output_dir: supply
+    sources:
+      osv:          true
+      ghsa:         true
+      ossf:         true
+      npm_registry:  true
+      pypi:          true
+      cargo:         false   # 403 Forbidden; OSV bulk covers crates.io advisories
+      maven:         false   # Solr API unreliable; OSV bulk covers Maven advisories
+      nuget:         false   # Catalog API timeouts; OSV bulk covers NuGet advisories
+      rubygems:      true
+      go_modules:    true
+      hex:           true
+      packagist:     true
+      pub:           true
+      wiz:          true
+      socket:       true
+      aikido:       true
+      stepsecurity: true
+      sonatype:     true
+      phylum:       true
+      snyk:           true
+      deps_dev:       true
+      github_actions: true
+      huggingface:    true
+    ecosystems:
+      - npm
+      - pypi
+      - cargo
+      - maven
+      - nuget
+      - rubygems
+      - go
+      - hex
+      - packagist
+      - pub
+      - github-actions
+      - huggingface
+    automerge:
+      trusted_sources: [wiz, socket, aikido, stepsecurity]
+      min_iocs: 3
+      delay_minutes: 60
+
+  malware:
+    output_dir: malware
+    sources:
+      polyswarm:    true
+      dfir_report:  true
+      elastic_labs: true
+      red_canary:   true
+      talos:        true
+      eset:         true
+      sekoia:       true
+      proofpoint:   true
+      malwarebytes: true
+    automerge:
+      trusted_sources: [dfir_report, elastic_labs, eset]
+      min_iocs: 5
+      delay_minutes: 120
+
+  ransomware:
+    output_dir: ransomware
+    sources:
+      ransomware_live:  true
+      secureworks:      true
+      emsisoft:         true
+      coveware:         true
+      blackfog:         true
+      corvus:           true
+    automerge:
+      trusted_sources: [secureworks, emsisoft]
+      min_iocs: 3
+      delay_minutes: 60
+
+  cve:
+    output_dir: cve
+    sources:
+      cisa:         true
+      nvd:          true
+      msrc:         true
+      project_zero: true
+      rapid7:       true
+      attackerkb:   true
+      greynoise:    true
+      horizon3:     true
+      watchtowr:    true
+      tenable:      true
+      vulncheck:    true
+    automerge:
+      trusted_sources: [cisa, msrc, project_zero]
+      min_iocs: 1
+      delay_minutes: 30
+
+  container:
+    output_dir: container
+    sources:
+      trivy_db:   true   # requires trivy binary on PATH
+      eol_date:   true
+      cisa:       true   # reuse existing CISA KEV source for Tier 1 flag
+      attackerkb: true   # reuse existing PoC source for Tier 3 flag
+    popular_image_threshold: 1000000  # minimum weekly pulls to be in scope
+    cvss_thresholds:
+      tier2: 9.0   # CVSS ≥ 9.0 → Tier 2 (no exploit required)
+      tier3: 7.0   # CVSS ≥ 7.0 + public PoC → Tier 3
+    automerge:
+      trusted_sources: [trivy_db, cisa]
+      min_iocs: 1
+      delay_minutes: 30
+
+cross_enrichment:
+  enabled: true
+  confidence_boost_per_domain: 0.08
+  link_shared_actors: true
+  link_shared_infrastructure: true
+
+multi_domain_sources:
+
+  bleepingcomputer:
+    feed: https://www.bleepingcomputer.com/feed/
+    global_exclude: [webinar, sponsored, "patch tuesday", "weekly recap",
+                     "us charges", "us indicts", arrested, sentenced]
+    routing:
+      - module: supply
+        include: [npm, pypi, "cargo registry", maven, nuget, rubygems, "supply chain",
+                  "malicious package", typosquat, "dependency confusion",
+                  "open source", gem, "package registry"]
+        exclude: [ransomware, "CVE-"]
+      - module: malware
+        include: [malware, trojan, infostealer, botnet, RAT, backdoor,
+                  loader, stealer, worm, dropper]
+        exclude: [ransomware, npm, pypi, gem]
+      - module: ransomware
+        include: [ransomware, LockBit, ALPHV, "Cl0p", "data encrypted",
+                  extortion, "ransom note", RaaS]
+        exclude: [npm, pypi]
+      - module: cve
+        include: ["CVE-", "zero-day", "actively exploited", vulnerability,
+                  "remote code execution", "privilege escalation", patch]
+        exclude: [ransomware, npm, pypi]
+
+  the_hacker_news:
+    feed: https://thehackernews.com/feeds/posts/default
+    global_exclude: [webinar, "[webinar]", sponsored, "weekly recap",
+                     "weekly cybersecurity"]
+    routing:
+      - module: supply
+        include: [npm, pypi, cargo, maven, nuget, gem, rubygems, "supply chain",
+                  "malicious package", typosquat, "hugging face", "model poisoning",
+                  "package registry", "open source package"]
+        exclude: [ransomware, RAT, android, "app verification"]
+      - module: malware
+        include: [malware, infostealer, backdoor, RAT, botnet, stealer]
+        exclude: [ransomware, npm, pypi]
+      - module: ransomware
+        include: [ransomware, "data breach", extortion, LockBit, ALPHV]
+      - module: cve
+        include: ["CVE-", vulnerability, "actively exploited", "zero-day",
+                  "remote code execution", patch]
+        exclude: [webinar, sponsored, launches, "AI-powered", introduces,
+                  "product update", "new feature", "powered by AI"]
+
+  krebsonsecurity:
+    feed: https://krebsonsecurity.com/feed/
+    global_exclude: [webinar, sponsored]
+    routing:
+      - module: supply
+        include: [npm, pypi, "supply chain", "open source", "malicious package"]
+      - module: ransomware
+        include: [ransomware, extortion, "data breach", ransom]
+        exclude: [ddos]
+
+  unit42:
+    feed: https://unit42.paloaltonetworks.com/feed/
+    global_exclude: [webinar, sponsored]
+    routing:
+      - module: malware
+        include: [malware, trojan, infostealer, RAT, backdoor, campaign]
+        exclude: [ransomware]
+      - module: ransomware
+        include: [ransomware, LockBit, ALPHV, "Cl0p", extortion]
+
+  microsoft_sec:
+    feed: https://www.microsoft.com/en-us/security/blog/feed/
+    global_exclude: [webinar, sponsored, "passkey day", "world password day", "awareness day"]
+    routing:
+      - module: malware
+        include: [malware, trojan, infostealer, campaign, threat actor]
+        exclude: [ransomware, "CVE-"]
+      - module: ransomware
+        include: [ransomware, extortion]
+      - module: cve
+        include: ["CVE-", vulnerability, patch, "Security Update"]
+
+  mandiant:
+    feed: https://www.mandiant.com/resources/blog/rss.xml
+    global_exclude: [webinar, sponsored]
+    routing:
+      - module: malware
+        include: [malware, APT, campaign, backdoor, espionage]
+        exclude: [ransomware]
+      - module: ransomware
+        include: [ransomware, FIN, extortion]
+      - module: cve
+        include: ["CVE-", vulnerability, "zero-day", exploitation]
+
+  securelist:
+    feed: https://securelist.com/feed/
+    global_exclude: [webinar, sponsored, contest]
+    routing:
+      - module: supply
+        include: ["supply chain", npm, pypi, cargo, maven, "open source package", "malicious package"]
+      - module: malware
+        include: [malware, backdoor, RAT, trojan, infostealer, spyware, "apt reports",
+                  "great research", "targeted attacks", campaign, APT, wiper, dropper]
+        exclude: [ransomware]
+      - module: ransomware
+        include: [ransomware, extortion, ransom, LockBit, ALPHV, "Cl0p"]
+      - module: cve
+        include: ["CVE-", "zero-day", vulnerability, "remote code execution",
+                  "privilege escalation", "actively exploited"]
+
+  crowdstrike:
+    feed: https://www.crowdstrike.com/en-us/blog/feed
+    global_exclude: [webinar, sponsored]
+    routing:
+      - module: malware
+        include: ["threat hunting", adversary, malware, backdoor, campaign, infostealer,
+                  SPIDER, BEAR, PANDA, KITTEN, CHOLLIMA, "from the front lines", APT]
+        exclude: [ransomware]
+      - module: ransomware
+        include: [ransomware, extortion, LockBit, ALPHV, SPIDER]
+      - module: cve
+        include: ["CVE-", "patch tuesday", "zero-day", vulnerability,
+                  "remote code execution", "actively exploited"]
+
+  sentinelone:
+    feed: https://www.sentinelone.com/blog/feed/
+    global_exclude: [webinar, sponsored, "singularity platform", "product update"]
+    routing:
+      - module: supply
+        include: ["supply chain attack", "CI/CD", npm, pypi, "open source", "package registry"]
+      - module: malware
+        include: [malware, APT, backdoor, infostealer, RAT, "credentials theft",
+                  campaign, trojan, wiper]
+        exclude: [ransomware]
+      - module: ransomware
+        include: [ransomware, extortion, ransom]
+      - module: cve
+        include: ["CVE-", "zero-day", vulnerability, "remote code execution"]
+
+  jfrog:
+    feed: https://jfrog.com/blog/feed/
+    global_exclude: [webinar, sponsored]
+    routing:
+      - module: supply
+        include: [hugging face, HuggingFace, "model poisoning", "malicious model",
+                  safetensors, transformers, "AI supply chain", "ML security", huntr,
+                  npm, pypi, "supply chain", "malicious package", "open source"]
+
+  protectai:
+    feed: https://protectai.com/blog/feed
+    global_exclude: [webinar, sponsored]
+    routing:
+      - module: supply
+        include: [hugging face, "model security", "ML supply chain",
+                  "model poisoning", "AI security", safetensors, huntr,
+                  npm, pypi, "supply chain", "malicious package"]

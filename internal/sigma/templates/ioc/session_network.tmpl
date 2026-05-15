@@ -1,0 +1,45 @@
+title: 'Dragnet [IOC]: {{.DragnetID}} — Session Network Communication'
+id: {{.ID}}
+status: {{.Status}}
+description: |
+  Detects connections to Session (decentralised messenger) network seed nodes or file servers
+  used for C2 communication by compromised package.
+  Incident: {{.DragnetID}}
+  {{.Description}}
+references:
+{{- range .References}}
+  - {{.}}
+{{- end}}
+author: dragnet-bot
+date: {{.Date}}
+tags:
+  - attack.t1071.001
+  - attack.t1102
+{{- range .Tags}}
+  - {{.}}
+{{- end}}
+logsource:
+  category: network_connection
+  product: any
+detection:
+{{- if .SessionSeedNodes}}
+  selection_seed:
+    DestinationHostname|contains:
+{{- range .SessionSeedNodes}}
+      - '{{.}}'
+{{- end}}
+{{- end}}
+{{- if .SessionFileServer}}
+  selection_fileserver:
+    DestinationHostname|contains:
+      - '{{.SessionFileServer}}'
+{{- end}}
+{{- if .SessionRecipientID}}
+  selection_recipient:
+    CommandLine|contains:
+      - '{{.SessionRecipientID}}'
+{{- end}}
+  condition: {{sessionCondition .}}
+falsepositives:
+  - Legitimate Session messenger usage
+level: {{.Level}}

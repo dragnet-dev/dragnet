@@ -1,0 +1,6 @@
+-- Dragnet [IOC]: npm-2026-001 — C2 Network Communication
+-- Status: stable | Level: critical | ID: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+SELECT DATEFORMAT(starttime,'YYYY-MM-dd HH:mm:ss') AS "Start Time", sourceip, destinationip, destinationhostname, destinationport
+FROM events
+WHERE (destinationhostname ILIKE '%git-tanstack.com%') OR (destinationip ILIKE '%83.142.209.194%')
+LAST 24 HOURS

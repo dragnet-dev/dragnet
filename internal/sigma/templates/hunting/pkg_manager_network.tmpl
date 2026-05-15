@@ -1,0 +1,44 @@
+title: 'Dragnet [Hunt]: {{.DragnetID}} — {{.Behaviour.ID}} Package Manager Unexpected Network Connection'
+id: {{.ID}}
+status: {{.Status}}
+description: |
+  Detects package manager processes (npm, pip, cargo) making unexpected outbound network
+  connections to non-registry endpoints during installation or postinstall scripts.
+  Behaviour: {{.Behaviour.ID}} — {{.Behaviour.Description}}
+  Incident: {{.DragnetID}}
+  {{.Description}}
+references:
+{{- range .References}}
+  - {{.}}
+{{- end}}
+author: dragnet-bot
+date: {{.Date}}
+tags:
+  - attack.t1071.001
+  - attack.t1195.002
+{{- range .Tags}}
+  - {{.}}
+{{- end}}
+logsource:
+  category: network_connection
+  product: any
+detection:
+  selection_process:
+    Image|contains:
+      - 'npm'
+      - 'node'
+      - 'pip'
+      - 'pip3'
+      - 'cargo'
+  filter_registry:
+    DestinationHostname|contains:
+      - 'registry.npmjs.org'
+      - 'pypi.org'
+      - 'crates.io'
+      - 'static.crates.io'
+      - 'files.pythonhosted.org'
+  condition: selection_process and not filter_registry
+falsepositives:
+  - Package managers legitimately contacting CDNs or mirrors
+  - Custom registry configurations
+level: {{.Level}}

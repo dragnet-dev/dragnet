@@ -1,0 +1,31 @@
+title: 'Dragnet [IOC]: {{.DragnetID}} — Malicious File Hash'
+id: {{.ID}}
+status: {{.Status}}
+description: |
+  Detects known-malicious file hashes associated with compromised package artifacts.
+  Incident: {{.DragnetID}}
+  {{.Description}}
+references:
+{{- range .References}}
+  - {{.}}
+{{- end}}
+author: dragnet-bot
+date: {{.Date}}
+tags:
+  - attack.t1195.002
+{{- range .Tags}}
+  - {{.}}
+{{- end}}
+logsource:
+  category: file_event
+  product: any
+detection:
+  selection:
+    Hashes|contains:
+{{- range .FileHashes}}
+      - '{{upper .Algorithm}}={{.Value}}'
+{{- end}}
+  condition: selection
+falsepositives:
+  - None expected — these are exact cryptographic hashes
+level: {{.Level}}

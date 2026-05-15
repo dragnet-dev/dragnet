@@ -1,0 +1,6 @@
+| comment "Dragnet [Hunt]: npm-2026-003 — Suspicious Process Access"
+| comment "Status: experimental | Level: medium | ID: c3d4e5f6-a7b8-9012-cdef-012345678902"
+index=* sourcetype=endpoint*
+| where (CommandLine="*/proc/*") AND (process="*node*")
+| table _time, host, process, parent_process, CommandLine
+| head 1000

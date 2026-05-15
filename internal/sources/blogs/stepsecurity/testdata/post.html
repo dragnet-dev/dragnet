@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html>
+<head><title>StepSecurity Blog - GitHub Actions Supply Chain Attack</title></head>
+<body>
+<article>
+  <h1>GitHub Actions Supply Chain Attack: Malicious npm Packages</h1>
+  <p>StepSecurity researchers identified a supply chain attack targeting CI/CD pipelines.</p>
+
+  <h2>Indicators of Compromise</h2>
+
+  <p><b>Files and payloads:</b></p>
+  <ul>
+    <li>malicious_action.js</li>
+    <li>exfil.js SHA-256: deadbeef1234567890abcdef1234567890abcdef1234567890abcdef12345678</li>
+    <li>stage2.sh SHA-256: cafebabe1234567890abcdef1234567890abcdef1234567890abcdef12345678</li>
+  </ul>
+
+  <p><b>Network indicators:</b></p>
+  <ul>
+    <li>hxxps://attacker[.]evil[.]example[.]com/collect</li>
+    <li>hxxp://c2[.]malware[.]example[.]com/cmd</li>
+    <li>192[.]168[.]100[.]200</li>
+  </ul>
+
+  <p><b>Campaign markers:</b></p>
+  <ul>
+    <li>Operation GitSlurp</li>
+  </ul>
+
+  <h2>Remediation</h2>
+  <p>Pin your GitHub Actions to specific commit SHAs.</p>
+</article>
+</body>
+</html>

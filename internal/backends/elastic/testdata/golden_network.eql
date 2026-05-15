@@ -1,0 +1,5 @@
+// Dragnet [IOC]: npm-2026-001 — C2 Network Communication
+// Status: stable | Level: critical | ID: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+
+network where
+  destination.domain like~ "*git-tanstack.com*" or destination.ip like~ "*83.142.209.194*"

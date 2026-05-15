@@ -1,0 +1,32 @@
+{
+  "name": "Dragnet [Hunt]: npm-2026-003 — Suspicious Process Access",
+  "type": "log_detection",
+  "queries": [
+    {
+      "name": "a",
+      "query": "@process.command_line:*/proc/* @process.name:*node*",
+      "aggregation": "count",
+      "groupByFields": []
+    }
+  ],
+  "cases": [
+    {
+      "name": "Detected",
+      "status": "medium",
+      "condition": "a \u003e 0",
+      "notifications": []
+    }
+  ],
+  "options": {
+    "evaluationWindow": 300,
+    "keepAlive": 3600,
+    "maxSignalDuration": 86400,
+    "detectionMethod": "threshold"
+  },
+  "message": "Suspicious node process accessing /proc/ filesystem.\n\n\nSigma ID: c3d4e5f6-a7b8-9012-cdef-012345678902 | Status: experimental",
+  "tags": [
+    "source:dragnet",
+    "security:supply-chain"
+  ],
+  "isEnabled": true
+}

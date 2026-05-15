@@ -1,0 +1,17 @@
+rule dragnet_ioc_npm_2026_001_c2_network_communication_34567890 {
+  meta:
+    author = "dragnet-bot"
+    description = "Network communication to Mini Shai-Hulud C2 infrastructure.\n"
+    severity = "HIGH"
+    rule_id = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+    sigma_status = "stable"
+    mitre_attack = "T1041"
+
+  events:
+    $e.metadata.event_type = "NETWORK_CONNECTION"
+    $e.target.hostname = /.*git-tanstack\.com.*/i
+    $e.target.ip = /.*83\.142\.209\.194.*/i
+
+  condition:
+    $e
+}

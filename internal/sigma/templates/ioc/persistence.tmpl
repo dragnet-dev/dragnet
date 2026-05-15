@@ -1,0 +1,49 @@
+title: 'Dragnet [IOC]: {{.DragnetID}} — Persistence Mechanism Detected'
+id: {{.ID}}
+status: {{.Status}}
+description: |
+  Detects persistence artefacts (services, LaunchAgents, systemd units) installed by compromised package.
+  Incident: {{.DragnetID}}
+  {{.Description}}
+references:
+{{- range .References}}
+  - {{.}}
+{{- end}}
+author: dragnet-bot
+date: {{.Date}}
+tags:
+  - attack.t1543
+  - attack.t1543.001
+  - attack.t1543.002
+{{- range .Tags}}
+  - {{.}}
+{{- end}}
+logsource:
+  category: file_event
+  product: any
+detection:
+{{- if .ServiceNames}}
+  selection_service:
+    TargetFilename|contains:
+{{- range .ServiceNames}}
+      - '{{.}}'
+{{- end}}
+{{- end}}
+{{- if .MacOSPersistence}}
+  selection_macos:
+    TargetFilename|contains:
+{{- range .MacOSPersistence}}
+      - '{{.}}'
+{{- end}}
+{{- end}}
+{{- if .LinuxPersistence}}
+  selection_linux:
+    TargetFilename|contains:
+{{- range .LinuxPersistence}}
+      - '{{.}}'
+{{- end}}
+{{- end}}
+  condition: {{persistenceCondition .}}
+falsepositives:
+  - Legitimate system services with similar names
+level: {{.Level}}

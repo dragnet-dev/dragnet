@@ -1,0 +1,50 @@
+title: 'Dragnet [Hunt]: {{.DragnetID}} — {{.Behaviour.ID}} Persistence Mechanism Created by Package Manager'
+id: {{.ID}}
+status: {{.Status}}
+description: |
+  Detects creation of persistence artefacts (LaunchAgents, systemd units, startup entries)
+  by package manager child processes during or after package installation.
+  Behaviour: {{.Behaviour.ID}} — {{.Behaviour.Description}}
+  Incident: {{.DragnetID}}
+  {{.Description}}
+references:
+{{- range .References}}
+  - {{.}}
+{{- end}}
+author: dragnet-bot
+date: {{.Date}}
+tags:
+  - attack.t1543
+  - attack.t1543.001
+  - attack.t1543.002
+{{- range .Tags}}
+  - {{.}}
+{{- end}}
+logsource:
+  category: file_event
+  product: any
+detection:
+  selection_launchagent:
+    TargetFilename|contains:
+      - '/Library/LaunchAgents/'
+      - '/Library/LaunchDaemons/'
+      - '~/Library/LaunchAgents/'
+    ParentImage|contains:
+      - 'npm'
+      - 'node'
+      - 'pip'
+      - 'cargo'
+  selection_systemd:
+    TargetFilename|contains:
+      - '/etc/systemd/system/'
+      - '/usr/lib/systemd/system/'
+      - '~/.config/systemd/user/'
+    ParentImage|contains:
+      - 'npm'
+      - 'node'
+      - 'pip'
+      - 'cargo'
+  condition: selection_launchagent or selection_systemd
+falsepositives:
+  - Developer tooling that legitimately installs system services
+level: {{.Level}}

@@ -1,0 +1,33 @@
+{
+  "name": "Dragnet [IOC]: npm-2026-001 — C2 Network Communication",
+  "type": "log_detection",
+  "queries": [
+    {
+      "name": "a",
+      "query": "@network.destination.hostname:*git-tanstack.com* OR @network.destination.ip:*83.142.209.194*",
+      "aggregation": "count",
+      "groupByFields": []
+    }
+  ],
+  "cases": [
+    {
+      "name": "Detected",
+      "status": "critical",
+      "condition": "a \u003e 0",
+      "notifications": []
+    }
+  ],
+  "options": {
+    "evaluationWindow": 300,
+    "keepAlive": 3600,
+    "maxSignalDuration": 86400,
+    "detectionMethod": "threshold"
+  },
+  "message": "Network communication to Mini Shai-Hulud C2 infrastructure.\n\n\nSigma ID: a1b2c3d4-e5f6-7890-abcd-ef1234567890 | Status: stable",
+  "tags": [
+    "source:dragnet",
+    "security:supply-chain",
+    "mitre:t1041"
+  ],
+  "isEnabled": true
+}

@@ -1,0 +1,16 @@
+rule dragnet_hunt_npm_2026_003_suspicious_process_access_45678902 {
+  meta:
+    author = "dragnet-bot"
+    description = "Suspicious node process accessing /proc/ filesystem.\n"
+    severity = "MEDIUM"
+    rule_id = "c3d4e5f6-a7b8-9012-cdef-012345678902"
+    sigma_status = "experimental"
+
+  events:
+    $e.metadata.event_type = "PROCESS_LAUNCH"
+    $e.principal.process.command_line = /.*/proc/.*/i
+    $e.principal.process.file.full_path = /.*node.*/i
+
+  condition:
+    $e
+}

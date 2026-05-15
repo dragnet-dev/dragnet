@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html>
+<head><title>Aikido Blog - Supply Chain Attack</title></head>
+<body>
+<article>
+  <h1>Supply Chain Attack on npm Packages</h1>
+  <p>Aikido security researchers have uncovered a sophisticated supply chain attack.</p>
+
+  <h2>Indicators Of Compromise</h2>
+
+  <p><b>Files and payloads:</b></p>
+  <ul>
+    <li>router_init.js</li>
+    <li>router_init.js SHA-256: ab4fcadaec1d282b900de5abb5b1d55dbd0e7af9628f6e7a5e2cb0e68b3b56aa</li>
+    <li>tanstack_runner.js SHA-256: 2ec78d55aabbccdd11223344aabbccdd11223344aabbccdd11223344aabbccdd</li>
+  </ul>
+
+  <p><b>Package markers:</b></p>
+  <ul>
+    <li>@tanstack/setup</li>
+    <li>github:tanstack/router#79ac49ee6b59a9a0d00d5b7c9e1d2b3a4c5d6e7f</li>
+  </ul>
+
+  <p><b>Network and service indicators:</b></p>
+  <ul>
+    <li>hxxp://filev2[.]getsession[.]org/file/</li>
+    <li>hxxps://cdn[.]evil[.]example[.]com/payload</li>
+    <li>83[.]142[.]209[.]194</li>
+  </ul>
+
+  <p><b>Campaign markers:</b></p>
+  <ul>
+    <li>A Mini Shai-Hulud has Appeared</li>
+  </ul>
+
+  <h2>Mitigation</h2>
+  <p>Immediately audit your npm lock files.</p>
+</article>
+</body>
+</html>

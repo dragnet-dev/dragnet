@@ -1,0 +1,7 @@
+// Dragnet [Hunt]: npm-2026-003 — Suspicious Process Access
+// Status: experimental | Level: medium | ID: c3d4e5f6-a7b8-9012-cdef-012345678902
+
+#event_simpleName=ProcessRollup2
+| CommandLine = */proc/* AND ImageFileName = *node*
+| table([timestamp, ComputerName, ImageFileName, CommandLine, ParentImageFileName])
+| limit(1000)

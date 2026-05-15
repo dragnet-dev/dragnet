@@ -1,0 +1,23 @@
+# Compiled binaries
+dragnet
+dragnet-linux-amd64
+dragnet-darwin-amd64
+dragnet-darwin-arm64
+dragnet-windows-amd64.exe
+
+# Live config — lives in dragnet-dev/haul (engine ships dragnet.yaml.example only)
+dragnet.yaml
+
+# Generated data — lives in dragnet-dev/haul
+supply/
+malware/
+ransomware/
+cve/
+container/
+feeds/
+incidents/
+actors/
+state/
+
+# IDE
+.claude/

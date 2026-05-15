@@ -1,0 +1,20 @@
+id: c3d4e5f6-a7b8-9012-cdef-012345678902
+name: 'Dragnet [Hunt]: npm-2026-003 — Suspicious Process Access'
+description: |
+    Suspicious node process accessing /proc/ filesystem.
+severity: Medium
+status: Available
+requiredDataConnectors:
+    - connectorId: MicrosoftDefenderAdvancedThreatProtection
+      dataTypes:
+        - DeviceProcessEvents
+query: |
+    // Dragnet [Hunt]: npm-2026-003 — Suspicious Process Access
+    // Status: experimental | Level: medium
+    // ID: c3d4e5f6-a7b8-9012-cdef-012345678902
+
+    DeviceProcessEvents
+    | where (FolderPath has "node")
+        and (ProcessCommandLine has "/proc/")
+    | project Timestamp, DeviceName, FolderPath, ProcessCommandLine, InitiatingProcessFolderPath, InitiatingProcessCommandLine
+    | limit 1000

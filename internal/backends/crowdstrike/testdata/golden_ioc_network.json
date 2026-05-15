@@ -1,0 +1,36 @@
+[
+  {
+    "type": "domain",
+    "value": "git-tanstack.com",
+    "action": "detect",
+    "severity": "HIGH",
+    "description": "Dragnet: Dragnet [IOC]: npm-2026-001 — C2 Network Communication | ID: a1b2c3d4-e5f6-7890-abcd-ef1234567890 | Status: stable",
+    "tags": [
+      "supply-chain",
+      "t1041"
+    ],
+    "source": "Dragnet",
+    "platforms": [
+      "windows",
+      "mac",
+      "linux"
+    ]
+  },
+  {
+    "type": "ipv4",
+    "value": "83.142.209.194",
+    "action": "detect",
+    "severity": "HIGH",
+    "description": "Dragnet: Dragnet [IOC]: npm-2026-001 — C2 Network Communication | ID: a1b2c3d4-e5f6-7890-abcd-ef1234567890 | Status: stable",
+    "tags": [
+      "supply-chain",
+      "t1041"
+    ],
+    "source": "Dragnet",
+    "platforms": [
+      "windows",
+      "mac",
+      "linux"
+    ]
+  }
+]

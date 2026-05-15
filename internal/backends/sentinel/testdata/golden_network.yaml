@@ -1,0 +1,24 @@
+id: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+name: 'Dragnet [IOC]: npm-2026-001 — C2 Network Communication'
+description: |
+    Network communication to Mini Shai-Hulud C2 infrastructure.
+severity: High
+status: Available
+requiredDataConnectors:
+    - connectorId: MicrosoftDefenderAdvancedThreatProtection
+      dataTypes:
+        - DeviceNetworkEvents
+tactics:
+    - Exfiltration
+relevantTechniques:
+    - T1041
+query: |
+    // Dragnet [IOC]: npm-2026-001 — C2 Network Communication
+    // Status: stable | Level: critical
+    // ID: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+
+    DeviceNetworkEvents
+    | where RemoteUrl has "git-tanstack.com"
+        or RemoteIP has "83.142.209.194"
+    | project Timestamp, DeviceName, RemoteUrl, RemoteIP, RemotePort, InitiatingProcessCommandLine
+    | limit 1000
