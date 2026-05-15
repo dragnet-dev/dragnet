@@ -1,0 +1,35 @@
+title: 'Dragnet [Ransomware]: {{.DragnetID}} — Mass File Rename ({{.RansomwareGroup}})'
+id: {{.ID}}
+status: {{.Status}}
+description: |
+  Detects high-frequency file rename events consistent with ransomware encryption by {{.RansomwareGroup}}.
+  Incident: {{.DragnetID}}
+  {{.Description}}
+references:
+{{- range .References}}
+  - {{.}}
+{{- end}}
+author: dragnet-bot
+date: {{.Date}}
+tags:
+  - attack.t1486
+{{- range .Tags}}
+  - {{.}}
+{{- end}}
+logsource:
+  category: file_rename
+  product: windows
+  definition: 'Requires file system audit policy or Sysmon file events'
+detection:
+  selection:
+    TargetFilename|endswith:
+{{- range .RansomNoteFilenames}}
+      - '{{.}}'
+{{- end}}
+      - '.encrypted'
+      - '.locked'
+      - '.ransom'
+  condition: selection
+falsepositives:
+  - Backup tools that rename files during processing
+level: {{.Level}}

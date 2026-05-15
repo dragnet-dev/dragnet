@@ -1,0 +1,32 @@
+title: 'Dragnet [Container]: {{.DragnetID}} — End-of-Life Base Image'
+id: {{.ID}}
+status: {{.Status}}
+description: |
+  Detects deployment of a container image based on an end-of-life product cycle.
+  EOL images receive no further security patches regardless of new CVEs.
+  Incident: {{.DragnetID}}
+  {{.Description}}
+references:
+{{- range .References}}
+  - {{.}}
+{{- end}}
+author: dragnet-bot
+date: {{.Date}}
+tags:
+  - attack.t1610
+{{- range .Tags}}
+  - {{.}}
+{{- end}}
+logsource:
+  category: container_image_pull
+detection:
+  selection:
+    Image|startswith:
+{{- range .EOLImages}}
+      - '{{.Repository}}:{{.Cycle}}.'
+      - '{{.Repository}}:{{.Cycle}}-'
+{{- end}}
+  condition: selection
+falsepositives:
+  - Internal base images that pin to EOL cycles intentionally
+level: high

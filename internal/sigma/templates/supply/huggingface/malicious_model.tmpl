@@ -1,0 +1,35 @@
+title: 'Dragnet [Supply]: {{.DragnetID}} — Malicious Hugging Face Model'
+id: {{.ID}}
+status: {{.Status}}
+description: |
+  Detects loading or referencing a Hugging Face model known to exhibit security anomalies
+  (unexpected binary format files, format downgrade from safetensors).
+  Incident: {{.DragnetID}}
+  {{.Description}}
+references:
+{{- range .References}}
+  - {{.}}
+{{- end}}
+author: dragnet-bot
+date: {{.Date}}
+tags:
+  - attack.t1195.002
+  - attack.t1059.006
+  - dragnet.supply-chain
+{{- range .Tags}}
+  - {{.}}
+{{- end}}
+logsource:
+  category: process_creation
+  product: linux
+detection:
+  selection_model_ref:
+    CommandLine|contains:
+{{- range .PackageNames}}
+      - '{{.}}'
+{{- end}}
+  condition: selection_model_ref
+falsepositives:
+  - Legitimate research use of the model prior to the advisory being published
+  - Internal evaluation environments with network isolation
+level: {{.Level}}

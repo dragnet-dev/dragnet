@@ -1,0 +1,43 @@
+title: 'Dragnet [CVE]: {{.DragnetID}} — Web Shell Creation ({{.CVEID}})'
+id: {{.ID}}
+status: {{.Status}}
+description: |
+  Detects file creation in web root directories following exploitation of {{.CVEID}}.
+  Incident: {{.DragnetID}}
+  {{.Description}}
+references:
+{{- range .References}}
+  - {{.}}
+{{- end}}
+author: dragnet-bot
+date: {{.Date}}
+tags:
+  - attack.t1505.003
+{{- range .Tags}}
+  - {{.}}
+{{- end}}
+logsource:
+  category: file_creation
+  product: windows
+detection:
+  selection_webroot:
+    TargetFilename|contains:
+      - '\inetpub\wwwroot\'
+      - '\htdocs\'
+      - '\www\'
+      - '/var/www/'
+    TargetFilename|endswith:
+      - '.aspx'
+      - '.asp'
+      - '.php'
+      - '.jsp'
+      - '.jspx'
+  filter_legit:
+    Image|contains:
+      - '\w3wp.exe'
+      - '\httpd.exe'
+      - '\nginx.exe'
+  condition: selection_webroot and not filter_legit
+falsepositives:
+  - Web developers deploying new application code
+level: {{.Level}}

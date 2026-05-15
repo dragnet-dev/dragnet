@@ -1,0 +1,32 @@
+title: 'Dragnet [Container]: {{.DragnetID}} — Vulnerable Base Image Pull'
+id: {{.ID}}
+status: {{.Status}}
+description: |
+  Detects deployment of a container image known to contain a critical vulnerability.
+  Incident: {{.DragnetID}} (Tier {{.ContainerTier}}, CVSS {{.ContainerCVSS}})
+  {{.Description}}
+references:
+{{- range .References}}
+  - {{.}}
+{{- end}}
+author: dragnet-bot
+date: {{.Date}}
+tags:
+  - attack.t1610
+  - attack.t1611
+{{- range .Tags}}
+  - {{.}}
+{{- end}}
+logsource:
+  category: container_image_pull
+detection:
+  selection:
+    Image|contains:
+{{- range imageTagList .AffectedImages}}
+      - '{{.}}'
+{{- end}}
+  condition: selection
+falsepositives:
+  - Cached images pulled before the vulnerability was published
+  - Internal image mirrors that have not been updated
+level: {{.Level}}

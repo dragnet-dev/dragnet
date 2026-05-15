@@ -1,0 +1,41 @@
+title: 'Dragnet [Ransomware]: {{.DragnetID}} — Shadow Copy Deletion ({{.RansomwareGroup}})'
+id: {{.ID}}
+status: {{.Status}}
+description: |
+  Detects shadow copy deletion commands associated with {{.RansomwareGroup}} ransomware.
+  Incident: {{.DragnetID}}
+  {{.Description}}
+references:
+{{- range .References}}
+  - {{.}}
+{{- end}}
+author: dragnet-bot
+date: {{.Date}}
+tags:
+  - attack.t1490
+{{- range .Tags}}
+  - {{.}}
+{{- end}}
+logsource:
+  category: process_creation
+  product: windows
+detection:
+  selection_vssadmin:
+    Image|endswith: '\vssadmin.exe'
+    CommandLine|contains|all:
+      - 'delete'
+      - 'shadows'
+  selection_wmic:
+    Image|endswith: '\wmic.exe'
+    CommandLine|contains|all:
+      - 'shadowcopy'
+      - 'delete'
+  selection_powershell:
+    Image|endswith:
+      - '\powershell.exe'
+      - '\pwsh.exe'
+    CommandLine|contains: 'Get-WmiObject Win32_ShadowCopy'
+  condition: 1 of selection_*
+falsepositives:
+  - Legitimate backup solution maintenance (rare)
+level: {{.Level}}

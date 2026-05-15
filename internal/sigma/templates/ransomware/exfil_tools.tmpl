@@ -1,0 +1,36 @@
+title: 'Dragnet [Ransomware]: {{.DragnetID}} — Exfiltration Tool Execution ({{.RansomwareGroup}})'
+id: {{.ID}}
+status: {{.Status}}
+description: |
+  Detects execution of data exfiltration tools observed in {{.RansomwareGroup}} intrusions.
+  Incident: {{.DragnetID}}
+  {{.Description}}
+references:
+{{- range .References}}
+  - {{.}}
+{{- end}}
+author: dragnet-bot
+date: {{.Date}}
+tags:
+  - attack.t1048
+  - attack.t1537
+{{- range .Tags}}
+  - {{.}}
+{{- end}}
+logsource:
+  category: process_creation
+  product: windows
+detection:
+  selection:
+    Image|endswith:
+{{- range .ToolNames}}
+      - '\{{.}}.exe'
+{{- end}}
+    CommandLine|contains:
+      - 'copy'
+      - 'sync'
+      - 'upload'
+  condition: selection
+falsepositives:
+  - Legitimate use of these tools for backup or admin purposes
+level: {{.Level}}

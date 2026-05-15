@@ -1,0 +1,40 @@
+title: 'Dragnet [Supply]: {{.DragnetID}} — Model Format Downgrade (safetensors → binary)'
+id: {{.ID}}
+status: {{.Status}}
+description: |
+  Detects loading of a Hugging Face model that has been downgraded from the secure
+  safetensors format to an unsafe binary format (.bin or .pt files), which can execute
+  arbitrary code when loaded with standard deserialization routines.
+  Incident: {{.DragnetID}}
+  {{.Description}}
+references:
+{{- range .References}}
+  - {{.}}
+{{- end}}
+author: dragnet-bot
+date: {{.Date}}
+tags:
+  - attack.t1195.002
+  - attack.t1059.006
+  - dragnet.supply-chain
+{{- range .Tags}}
+  - {{.}}
+{{- end}}
+logsource:
+  category: process_creation
+  product: linux
+detection:
+  selection_model_ref:
+    CommandLine|contains:
+{{- range .PackageNames}}
+      - '{{.}}'
+{{- end}}
+  selection_binary_ext:
+    CommandLine|contains:
+      - '.bin'
+      - '.pt'
+  condition: selection_model_ref and selection_binary_ext
+falsepositives:
+  - Models that have always distributed binary format and have not been downgraded
+  - Offline copies of the model loaded from a known-good cache
+level: {{.Level}}

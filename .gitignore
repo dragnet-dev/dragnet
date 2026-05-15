@@ -8,16 +8,18 @@ dragnet-windows-amd64.exe
 # Live config — lives in dragnet-dev/haul (engine ships dragnet.yaml.example only)
 dragnet.yaml
 
-# Generated data — lives in dragnet-dev/haul
-supply/
-malware/
-ransomware/
-cve/
-container/
-feeds/
-incidents/
-actors/
-state/
+# Generated data — lives in dragnet-dev/haul. Anchored to repo root with
+# leading `/` so they don't accidentally match internal/{state,container,...}
+# Go packages.
+/supply/
+/malware/
+/ransomware/
+/cve/
+/container/
+/feeds/
+/incidents/
+/actors/
+/state/
 
 # IDE
 .claude/

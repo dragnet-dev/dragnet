@@ -1,0 +1,31 @@
+title: 'Dragnet [Supply]: {{.DragnetID}} — Unpinned GitHub Action Reference'
+id: {{.ID}}
+status: experimental
+description: |
+  Detects GitHub Actions workflow files that reference an action using a mutable tag
+  (e.g. @v3) rather than a pinned commit SHA (e.g. @sha256:...). Mutable tag references
+  are vulnerable to supply chain compromise if the action author's account is taken over.
+  Incident: {{.DragnetID}}
+  {{.Description}}
+references:
+{{- range .References}}
+  - {{.}}
+{{- end}}
+author: dragnet-bot
+date: {{.Date}}
+tags:
+  - attack.t1195.002
+  - dragnet.supply-chain
+{{- range .Tags}}
+  - {{.}}
+{{- end}}
+logsource:
+  product: github
+  category: github_actions_workflow
+detection:
+  selection:
+    uses|re: '^{{range .PackageNames}}{{.}}{{end}}@v[0-9]'
+  condition: selection
+falsepositives:
+  - Intentional use of a mutable tag in a trusted, monitored action
+level: informational

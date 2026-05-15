@@ -1,0 +1,47 @@
+title: 'Dragnet [CVE]: {{.DragnetID}} — Web Server Outbound Connection ({{.CVEID}})'
+id: {{.ID}}
+status: {{.Status}}
+description: |
+  Detects unexpected outbound connections from web server processes after exploitation of {{.CVEID}}.
+  Incident: {{.DragnetID}}
+  {{.Description}}
+references:
+{{- range .References}}
+  - {{.}}
+{{- end}}
+author: dragnet-bot
+date: {{.Date}}
+tags:
+  - attack.t1190
+  - attack.t1071.001
+{{- range .Tags}}
+  - {{.}}
+{{- end}}
+logsource:
+  category: network_connection
+  product: windows
+detection:
+  selection:
+    Image|contains:
+      - '\w3wp.exe'
+      - '\httpd.exe'
+      - '\nginx.exe'
+      - '\php.exe'
+      - '\php-cgi.exe'
+      - '\java.exe'
+      - '\tomcat'
+    Initiated: 'true'
+    DestinationPort|contains:
+      - '4444'
+      - '443'
+      - '80'
+      - '8080'
+  filter_update:
+    DestinationIp|startswith:
+      - '127.'
+      - '10.'
+      - '192.168.'
+  condition: selection and not filter_update
+falsepositives:
+  - Web applications making legitimate API calls to external services
+level: {{.Level}}

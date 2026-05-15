@@ -1,0 +1,34 @@
+title: 'Dragnet [Supply]: {{.DragnetID}} — Compromised GitHub Action'
+id: {{.ID}}
+status: {{.Status}}
+description: |
+  Detects use of a GitHub Action known to be compromised or whose tag SHA changed unexpectedly.
+  Incident: {{.DragnetID}}
+  {{.Description}}
+references:
+{{- range .References}}
+  - {{.}}
+{{- end}}
+author: dragnet-bot
+date: {{.Date}}
+tags:
+  - attack.t1195.002
+  - attack.t1552.001
+  - dragnet.supply-chain
+{{- range .Tags}}
+  - {{.}}
+{{- end}}
+logsource:
+  product: github
+  category: github_actions_workflow
+detection:
+  selection:
+    uses|contains:
+{{- range .PackageNames}}
+      - '{{.}}@'
+{{- end}}
+  condition: selection
+falsepositives:
+  - Forks or mirrors of the action repository that are legitimately used
+  - Workflow files referencing the action for purposes other than execution
+level: {{.Level}}
