@@ -135,8 +135,19 @@ func runGenerate(_ *cobra.Command, _ []string) error {
 			}
 			allModuleIncidents[modName] = modIncidents
 
-			if err := index.GenerateModuleIndex(modName, modIncidents, modCfg.OutputDir); err != nil {
-				log.Printf("[generate][%s] index: %v", modName, err)
+			// Don't overwrite the curated index.json that sync just wrote unless
+			// generate is being run standalone with no prior sync output. When
+			// sync has produced all/*.jsonl, those files are authoritative; the
+			// index.json sync wrote already reflects the curated subset of the
+			// full merged data, including the bulk OSV/OSSF records that aren't
+			// reachable via the on-disk YAMLs generate walks.
+			allDir := filepath.Join(incidentsDir, "all")
+			if _, err := os.Stat(allDir); os.IsNotExist(err) {
+				if err := index.WriteCuratedIndex(modName, modIncidents, modCfg.OutputDir); err != nil {
+					log.Printf("[generate][%s] index: %v", modName, err)
+				}
+			} else {
+				log.Printf("[generate][%s] index: skipped (sync already wrote it from full dataset)", modName)
 			}
 
 			iocExp := ioc.New()

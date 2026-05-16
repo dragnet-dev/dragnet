@@ -18,6 +18,7 @@ import (
 	"github.com/dragnet-dev/dragnet/internal/config"
 	"github.com/dragnet-dev/dragnet/internal/container"
 	"github.com/dragnet-dev/dragnet/internal/incident"
+	"github.com/dragnet-dev/dragnet/internal/index"
 	"github.com/dragnet-dev/dragnet/internal/ioc"
 	"github.com/dragnet-dev/dragnet/internal/popularity"
 	"github.com/dragnet-dev/dragnet/internal/sigma"
@@ -366,6 +367,26 @@ func runSync(_ *cobra.Command, _ []string) error {
 			attrStart := time.Now()
 			incidents = actor.Attribute(incidents, actorStore, modName)
 			log.Printf("[sync][%s] actor.Attribute: done in %s", modName, time.Since(attrStart).Round(time.Second))
+		}
+
+		// Persist the full merged incident set as the authoritative haul data:
+		//   {module}/incidents/all/{shard}.jsonl   — every incident, sharded by ID prefix
+		//   {module}/incidents/index.json          — curated subset for port's listing
+		//   {module}/lookup/by-package.json        — ecosystem/name -> incidents lookup
+		// port/buoy/scope/trawl all consume these. Generate's STIX/sigma compilation
+		// reads all.jsonl when on-disk YAMLs are absent.
+		if !syncDryRun {
+			persistStart := time.Now()
+			if err := index.WriteAllJSONLShards(incidents, modCfg.OutputDir); err != nil {
+				log.Printf("[sync][%s] persist all.jsonl: %v", modName, err)
+			}
+			if err := index.WriteByPackageLookup(incidents, modCfg.OutputDir); err != nil {
+				log.Printf("[sync][%s] persist by-package: %v", modName, err)
+			}
+			if err := index.WriteCuratedIndex(modName, incidents, modCfg.OutputDir); err != nil {
+				log.Printf("[sync][%s] persist index.json: %v", modName, err)
+			}
+			log.Printf("[sync][%s] persist: done in %s", modName, time.Since(persistStart).Round(time.Second))
 		}
 
 		moduleIncidents[modName] = incidents
