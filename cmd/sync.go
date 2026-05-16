@@ -43,6 +43,18 @@ const perSourceFetchTimeout = 90 * time.Second
 // still-running goroutines, and proceeds with whatever was collected.
 const allSourcesDeadline = 5 * time.Minute
 
+// fetchHeartbeatInterval controls how often we log "still waiting on these
+// sources" while wg.Wait blocks. Critical for CI runs where the only signal
+// of progress is stderr.
+const fetchHeartbeatInterval = 30 * time.Second
+
+// hardWallClockBudget is an absolute escape hatch for the entire sync command.
+// If something goes really sideways and even allSourcesDeadline doesn't fire
+// (suspected runtime starvation under heavy GC pressure on the prior haul
+// run), this watchdog os.Exit()s to make sure CI never burns the full 6h
+// runner budget.
+const hardWallClockBudget = 20 * time.Minute
+
 var syncCmd = &cobra.Command{
 	Use:   "sync",
 	Short: "Poll intelligence sources and update rules for one or all modules",
@@ -137,6 +149,23 @@ func runSync(_ *cobra.Command, _ []string) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
 
+	// Watchdog: hard os.Exit if the entire sync hasn't completed within
+	// hardWallClockBudget. This is the absolute escape hatch when the
+	// per-source ctx, the allSourcesDeadline, and the heartbeat all somehow
+	// fail to bail us out — observed once on the first haul sync where the
+	// engine produced no output for 30min before the workflow killed it.
+	syncDoneWatchdog := make(chan struct{})
+	defer close(syncDoneWatchdog)
+	go func() {
+		select {
+		case <-syncDoneWatchdog:
+			return
+		case <-time.After(hardWallClockBudget):
+			log.Printf("[sync] HARD WATCHDOG: %s elapsed without completion, forcing exit", hardWallClockBudget)
+			os.Exit(2)
+		}
+	}()
+
 	iocExp := ioc.New()
 
 	// ATT&CK actor store — fetched once, used by all modules for attribution.
@@ -203,7 +232,7 @@ func runSync(_ *cobra.Command, _ []string) error {
 			incidents     []*incident.Incident
 			fetchErrCount int32
 			wg            sync.WaitGroup
-			pending       sync.Map // src.Name() -> struct{} for any source still running
+			pending       sync.Map // src.Name() -> startTime for any source still running
 		)
 		sem := make(chan struct{}, 10)
 		for _, src := range srcs {
@@ -212,45 +241,78 @@ func runSync(_ *cobra.Command, _ []string) error {
 				defer wg.Done()
 				sem <- struct{}{}
 				defer func() { <-sem }()
-				pending.Store(s.Name(), struct{}{})
+				start := time.Now()
+				pending.Store(s.Name(), start)
 				defer pending.Delete(s.Name())
 				log.Printf("[sync][%s] fetching %s since %s", modName, s.Name(), since.Format(time.RFC3339))
 				fetchCtx, fetchCancel := context.WithTimeout(ctx, perSourceFetchTimeout)
 				got, err := s.Fetch(fetchCtx, since)
 				fetchCancel()
+				dur := time.Since(start).Round(time.Millisecond)
 				if err != nil {
-					log.Printf("[sync][%s] %s: %v (skipping)", modName, s.Name(), err)
+					log.Printf("[sync][%s] %s: %v (skipping after %s)", modName, s.Name(), err, dur)
 					atomic.AddInt32(&fetchErrCount, 1)
 					return
 				}
+				log.Printf("[sync][%s] %s: fetched %d incidents in %s", modName, s.Name(), len(got), dur)
 				mu.Lock()
 				incidents = append(incidents, got...)
 				mu.Unlock()
 			}(src)
 		}
 
-		// Hard wait deadline. Some sources have local processing loops that
-		// don't honour ctx.Done(), so wg.Wait() alone can hang forever even
-		// after every per-fetch context has been cancelled. After
-		// allSourcesDeadline, abandon any still-running goroutines and
-		// proceed with whatever incidents have been collected so far.
+		// Wait for fetches with three layers of safety:
+		//   1. heartbeat — log every 30s which sources are still running so a
+		//      stuck run is visible from CI logs immediately, not on cancel.
+		//   2. allSourcesDeadline — bail out at 5min, abandon stuck goroutines.
+		//   3. hardWallClockBudget watchdog (separate goroutine started above)
+		//      os.Exit()s the whole binary at 20min, regardless.
+		// Layer 2 alone proved unreliable on the first haul sync (silence for
+		// 30min before the workflow killed it) — possibly runtime starvation
+		// under heavy GC after big slice appends.
 		done := make(chan struct{})
 		go func() { wg.Wait(); close(done) }()
-		select {
-		case <-done:
-		case <-time.After(allSourcesDeadline):
-			var stuck []string
-			pending.Range(func(k, _ any) bool {
-				stuck = append(stuck, k.(string))
-				return true
-			})
-			log.Printf("[sync][%s] hit %s deadline; abandoning %d source(s) still running: %s",
-				modName, allSourcesDeadline, len(stuck), strings.Join(stuck, ", "))
-			atomic.AddInt32(&fetchErrCount, int32(len(stuck)))
+		heartbeat := time.NewTicker(fetchHeartbeatInterval)
+		deadline := time.After(allSourcesDeadline)
+	waitLoop:
+		for {
+			select {
+			case <-done:
+				heartbeat.Stop()
+				break waitLoop
+			case <-deadline:
+				heartbeat.Stop()
+				var stuck []string
+				now := time.Now()
+				pending.Range(func(k, v any) bool {
+					stuck = append(stuck, fmt.Sprintf("%s(%s)", k.(string), now.Sub(v.(time.Time)).Round(time.Second)))
+					return true
+				})
+				log.Printf("[sync][%s] hit %s deadline; abandoning %d source(s) still running: %s",
+					modName, allSourcesDeadline, len(stuck), strings.Join(stuck, ", "))
+				atomic.AddInt32(&fetchErrCount, int32(len(stuck)))
+				break waitLoop
+			case <-heartbeat.C:
+				var pendingNames []string
+				now := time.Now()
+				pending.Range(func(k, v any) bool {
+					pendingNames = append(pendingNames, fmt.Sprintf("%s(%s)", k.(string), now.Sub(v.(time.Time)).Round(time.Second)))
+					return true
+				})
+				log.Printf("[sync][%s] heartbeat: %d source(s) still running: %s",
+					modName, len(pendingNames), strings.Join(pendingNames, ", "))
+			}
 		}
 
 		// OSV package enrichment for the supply module.
-		if modName == "supply" {
+		//
+		// IMPORTANT: skip when the bulk OSV path was taken (since > 7 days).
+		// Bulk export already returned every OSV advisory; enriching would
+		// then issue thousands of additional /querybatch HTTP calls in series
+		// for duplicate data and burn 5-20+ minutes silently. The bulk cutoff
+		// here mirrors osv.bulkCutoff inside the OSV client.
+		const osvBulkCutoff = 7 * 24 * time.Hour
+		if modName == "supply" && time.Since(since) <= osvBulkCutoff {
 			var pkgsToEnrich []incident.Package
 			seen := map[string]bool{}
 			for _, inc := range incidents {
@@ -263,29 +325,47 @@ func runSync(_ *cobra.Command, _ []string) error {
 				}
 			}
 			if len(pkgsToEnrich) > 0 {
+				log.Printf("[sync][%s] osv enrich: starting with %d unique packages", modName, len(pkgsToEnrich))
 				osvClient := osv.New()
+				enrichStart := time.Now()
 				enriched, err := osvClient.EnrichPackages(ctx, pkgsToEnrich)
 				if err != nil {
-					log.Printf("[sync][%s] osv enrich: %v (skipping)", modName, err)
+					log.Printf("[sync][%s] osv enrich: %v (skipping after %s)", modName, err, time.Since(enrichStart).Round(time.Second))
 				} else if len(enriched) > 0 {
-					log.Printf("[sync][%s] osv enrich: %d additional advisories", modName, len(enriched))
+					log.Printf("[sync][%s] osv enrich: %d additional advisories in %s", modName, len(enriched), time.Since(enrichStart).Round(time.Second))
 					incidents = append(incidents, enriched...)
 				}
 			}
+		} else if modName == "supply" {
+			log.Printf("[sync][%s] osv enrich: skipped (bulk fetch already included full advisory set)", modName)
+		}
 
-			// Typosquat detection + impact scoring for supply module.
+		// Supply enrichment is now local-only (no HTTP calls — uses the
+		// popular-packages snapshot in popularByEco), so it's safe even for
+		// the bulk path's 264k+ incidents.
+		if modName == "supply" {
+			log.Printf("[sync][%s] enrichSupplyIncidents: %d incidents", modName, len(incidents))
+			stepStart := time.Now()
 			incidents = enrichSupplyIncidents(ctx, incidents, popularByEco)
+			log.Printf("[sync][%s] enrichSupplyIncidents: done in %s", modName, time.Since(stepStart).Round(time.Second))
 		}
 
 		if modName == "container" {
 			incidents = enrichContainerIncidents(incidents, popularImages, cfg.Modules["container"])
 		}
 
+		// MergeAll uses union-find bucketing by every package/campaign/IOC key,
+		// so it's near-linear even on the 490k bulk-load case. No skip needed.
+		log.Printf("[sync][%s] MergeAll: merging %d incidents", modName, len(incidents))
+		mergeStart := time.Now()
 		incidents = incident.MergeAll(incidents)
+		log.Printf("[sync][%s] MergeAll: done in %s (%d after merge)", modName, time.Since(mergeStart).Round(time.Second), len(incidents))
 
-		// Actor attribution — links incidents to ATT&CK actor profiles.
+		// Actor attribution — O(incidents × actors), ~5s for 490k × 174.
 		if actorStore != nil {
+			attrStart := time.Now()
 			incidents = actor.Attribute(incidents, actorStore, modName)
+			log.Printf("[sync][%s] actor.Attribute: done in %s", modName, time.Since(attrStart).Round(time.Second))
 		}
 
 		moduleIncidents[modName] = incidents
@@ -371,7 +451,13 @@ func runSync(_ *cobra.Command, _ []string) error {
 		}
 		gen := sigma.New(sigmaOutDir, modName, sigmaReg)
 
-		for _, inc := range incidents {
+		genStart := time.Now()
+		log.Printf("[sync][%s] generating rules + IOC feeds for %d incidents", modName, len(incidents))
+		for i, inc := range incidents {
+			// Progress every 20k for the bulk case (264k OSV advisories).
+			if i > 0 && i%20_000 == 0 {
+				log.Printf("[sync][%s] generate progress: %d/%d (%s elapsed)", modName, i, len(incidents), time.Since(genStart).Round(time.Second))
+			}
 			if syncDryRun {
 				log.Printf("[sync][%s] dry-run: would generate rules for %s", modName, inc.ID)
 				continue
@@ -389,6 +475,7 @@ func runSync(_ *cobra.Command, _ []string) error {
 				}
 			}
 		}
+		log.Printf("[sync][%s] generate: done in %s", modName, time.Since(genStart).Round(time.Second))
 
 		// Write multi-domain blog posts as draft YAMLs for human triage.
 		// Only write drafts that have at least one technical signal — packages,
@@ -530,8 +617,29 @@ func writeDraftIncidents(draftsDir string, drafts []*incident.Incident, dryRun b
 }
 
 // enrichSupplyIncidents runs typosquat detection and impact scoring on supply chain incidents.
+//
+// Impact scoring uses the locally-loaded popular-packages snapshot
+// (state/popular_packages/{ecosystem}.json) rather than firing one HTTP call
+// per package per incident. The old code burned ~500k registry requests on
+// the first run (264k incidents × ~2 pkgs each), risking IP-level rate
+// limiting on npm/pypi. Long-tail packages not in the popular list contribute
+// no impact data — by construction those have low download counts and
+// low impact, which is exactly what we'd report anyway.
 func enrichSupplyIncidents(ctx context.Context, incidents []*incident.Incident, popularByEco map[string][]popularity.PopularPackage) []*incident.Incident {
 	const typosquatThreshold = 0.80
+
+	// Build a per-ecosystem name→PopularPackage map once so impact lookups
+	// are O(1) instead of O(n) over the popular slice.
+	popularIdx := make(map[string]map[string]popularity.PopularPackage, len(popularByEco))
+	for eco, pkgs := range popularByEco {
+		m := make(map[string]popularity.PopularPackage, len(pkgs))
+		for _, p := range pkgs {
+			m[p.Name] = p
+		}
+		popularIdx[eco] = m
+	}
+
+	_ = ctx // formerly used by FetchDownloads; kept on signature for compatibility
 
 	for _, inc := range incidents {
 		for _, pkg := range inc.Packages {
@@ -558,37 +666,30 @@ func enrichSupplyIncidents(ctx context.Context, incidents []*incident.Incident, 
 			}
 		}
 
-		// Impact scoring — fetch download stats for all affected packages concurrently.
+		// Impact scoring — local lookup only, no HTTP. Packages not in the
+		// popular snapshot get no entry (treated as low-impact long-tail).
 		var (
-			impMu          sync.Mutex
 			packageImpacts []incident.PackageImpact
 			totalWeekly    int64
 		)
-		var wg sync.WaitGroup
 		for _, pkg := range inc.Packages {
-			wg.Add(1)
-			go func(p incident.Package) {
-				defer wg.Done()
-				stats, err := popularity.FetchDownloads(ctx, p.Ecosystem, p.Name)
-				if err != nil || stats == nil {
-					return
-				}
-				rating := string(popularity.ComputeImpactRating(stats.Weekly))
-				imp := incident.PackageImpact{
-					Name:             p.Name,
-					Ecosystem:        p.Ecosystem,
-					WeeklyDownloads:  stats.Weekly,
-					MonthlyDownloads: stats.Monthly,
-					ImpactRating:     rating,
-					FetchedAt:        stats.FetchedAt,
-				}
-				impMu.Lock()
-				packageImpacts = append(packageImpacts, imp)
-				totalWeekly += stats.Weekly
-				impMu.Unlock()
-			}(pkg)
+			eco, ok := popularIdx[pkg.Ecosystem]
+			if !ok {
+				continue
+			}
+			hit, ok := eco[pkg.Name]
+			if !ok {
+				continue
+			}
+			packageImpacts = append(packageImpacts, incident.PackageImpact{
+				Name:             pkg.Name,
+				Ecosystem:        pkg.Ecosystem,
+				WeeklyDownloads:  hit.WeeklyDownloads,
+				MonthlyDownloads: 0, // not in the popular snapshot; weekly is what matters for impact rating
+				ImpactRating:     hit.ImpactRating,
+			})
+			totalWeekly += hit.WeeklyDownloads
 		}
-		wg.Wait()
 
 		if len(packageImpacts) > 0 {
 			overallRating := string(popularity.ComputeImpactRating(topWeekly(packageImpacts)))

@@ -36,16 +36,126 @@ func Merge(incidents []*Incident) (*Incident, error) {
 }
 
 // MergeAll groups and merges all incidents, returning one per independent event.
+//
+// Algorithm: union-find by every merge key (every package, every campaign name,
+// every IOC value). Two incidents end up in the same equivalence class iff they
+// share at least one key. The pairwise match logic (with date-proximity and
+// IOC threshold rules) then runs ONLY within each class. Practical complexity:
+// ~O(n × avg_keys_per_incident); for the 490k bulk-load case this drops the
+// previous O(n²) ~120B comparisons to ~5M.
+//
+// Transitivity is preserved by construction — if A shares a key with B and B
+// shares a key (any key) with C, all three land in the same class and the
+// existing groupIncidents inside the class handles the merge.
 func MergeAll(incidents []*Incident) []*Incident {
 	if len(incidents) == 0 {
 		return nil
 	}
-	groups := groupIncidents(incidents)
-	out := make([]*Incident, 0, len(groups))
-	for _, g := range groups {
-		out = append(out, mergeGroup(g))
+
+	uf := newUnionFind(len(incidents))
+	keyToFirstIdx := map[string]int{}
+	addKey := func(idx int, key string) {
+		if key == "" {
+			return
+		}
+		if prev, ok := keyToFirstIdx[key]; ok {
+			uf.Union(prev, idx)
+		} else {
+			keyToFirstIdx[key] = idx
+		}
+	}
+
+	for i, inc := range incidents {
+		for _, p := range inc.Packages {
+			if p.Name != "" && p.Ecosystem != "" {
+				addKey(i, "pkg:"+strings.ToLower(p.Ecosystem)+"/"+strings.ToLower(p.Name))
+			}
+		}
+		if inc.Campaign.Name != "" {
+			addKey(i, "campaign:"+strings.ToLower(inc.Campaign.Name))
+		}
+		for _, ioc := range collectIOCs(inc) {
+			addKey(i, "ioc:"+strings.ToLower(ioc))
+		}
+	}
+
+	// Materialise equivalence classes from the union-find.
+	classes := map[int][]*Incident{}
+	for i, inc := range incidents {
+		root := uf.Find(i)
+		classes[root] = append(classes[root], inc)
+	}
+
+	// Pairwise merge inside each class. The IOC-threshold + date-proximity
+	// rule in shouldMerge still gates the final decision; bucketing only
+	// narrows the candidate set.
+	out := make([]*Incident, 0, len(incidents))
+	for _, class := range classes {
+		if len(class) == 1 {
+			out = append(out, class[0])
+			continue
+		}
+		for _, g := range groupIncidents(class) {
+			out = append(out, mergeGroup(g))
+		}
 	}
 	return out
+}
+
+// collectIOCs flattens every IOC value on an incident, used only as union-find
+// keys. We deliberately don't include date proximity here — the date check is
+// re-applied inside groupIncidents → shouldMerge.
+func collectIOCs(inc *Incident) []string {
+	var out []string
+	for _, v := range inc.Indicators.Domains {
+		out = append(out, v.Value)
+	}
+	for _, v := range inc.Indicators.IPs {
+		out = append(out, v.Value)
+	}
+	for _, v := range inc.Indicators.URLs {
+		out = append(out, v.Value)
+	}
+	for _, v := range inc.Indicators.FileHashes {
+		out = append(out, v.Value)
+	}
+	return out
+}
+
+// unionFind is a textbook disjoint-set with path compression and union-by-rank.
+type unionFind struct {
+	parent []int
+	rank   []int
+}
+
+func newUnionFind(n int) *unionFind {
+	parent := make([]int, n)
+	for i := range parent {
+		parent[i] = i
+	}
+	return &unionFind{parent: parent, rank: make([]int, n)}
+}
+
+func (u *unionFind) Find(x int) int {
+	for u.parent[x] != x {
+		u.parent[x] = u.parent[u.parent[x]]
+		x = u.parent[x]
+	}
+	return x
+}
+
+func (u *unionFind) Union(a, b int) {
+	ra, rb := u.Find(a), u.Find(b)
+	if ra == rb {
+		return
+	}
+	if u.rank[ra] < u.rank[rb] {
+		ra, rb = rb, ra
+	}
+	u.parent[rb] = ra
+	if u.rank[ra] == u.rank[rb] {
+		u.rank[ra]++
+	}
 }
 
 func groupIncidents(incidents []*Incident) [][]*Incident {

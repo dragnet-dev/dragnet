@@ -9,19 +9,46 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/dragnet-dev/dragnet/internal/deconflict"
 	"github.com/dragnet-dev/dragnet/internal/incident"
 )
 
-// isValidIP returns true when s is a syntactically valid IPv4 or IPv6 address.
-func isValidIP(s string) bool { return net.ParseIP(s) != nil }
+// isPublicIP returns true when s is a syntactically valid IPv4 or IPv6 address
+// AND is not in any allowlisted range (loopback, RFC1918, link-local, AWS IMDS).
+// Without the deconflict check the feed would contain noise like 127.0.0.1
+// and 169.254.169.254 leaked through from CVE proof-of-concept code samples.
+func isPublicIP(s string) bool {
+	if net.ParseIP(s) == nil {
+		return false
+	}
+	return !deconflict.IP(s)
+}
 
-// isLikelyDomain returns true when s looks like a hostname and is not an IP.
-// Rejects anything containing spaces, ports, or path characters.
+// validTLD matches the last DNS label: 2-24 lowercase letters. This rejects
+// the garbage values that occasionally slip out of blog table parsers, where
+// the IOC value gets concatenated with the type tag — e.g. `proton.meThreat`,
+// `-IP142.11.206.73C2`, `07d889e2…c766Domainsfrclak.comC2`. None of those
+// have a clean lowercase-letter TLD.
 func isLikelyDomain(s string) bool {
 	if net.ParseIP(s) != nil {
 		return false
 	}
-	return strings.ContainsRune(s, '.') && !strings.ContainsAny(s, " \t:/\\@,;=")
+	if !strings.ContainsRune(s, '.') || strings.ContainsAny(s, " \t:/\\@,;=") {
+		return false
+	}
+	tld := s[strings.LastIndex(s, ".")+1:]
+	if len(tld) < 2 || len(tld) > 24 {
+		return false
+	}
+	for _, c := range tld {
+		if c < 'a' || c > 'z' {
+			return false
+		}
+	}
+	if deconflict.Domain(s) {
+		return false
+	}
+	return true
 }
 
 // Exporter writes plain-text and unified JSON IOC feed files.
@@ -51,14 +78,18 @@ func (e *Exporter) Export(inc *incident.Incident, dir string) error {
 		return fmt.Errorf("domains.txt: %w", err)
 	}
 
-	// Collect IPs — only syntactically valid addresses.
+	// Collect IPs — only syntactically valid, publicly-routable addresses.
 	var ips []string
 	for _, ip := range inc.Indicators.IPs {
-		if isValidIP(ip.Value) {
+		if isPublicIP(ip.Value) {
 			ips = append(ips, ip.Value)
 		}
 	}
-	ips = append(ips, promoIPs...)
+	for _, ip := range promoIPs {
+		if isPublicIP(ip) {
+			ips = append(ips, ip)
+		}
+	}
 	if err := appendLines(filepath.Join(dir, "ips.txt"), ips); err != nil {
 		return fmt.Errorf("ips.txt: %w", err)
 	}
@@ -323,12 +354,12 @@ func appendUnified(path string, inc *incident.Incident) error {
 	for _, d := range inc.Indicators.Domains {
 		if isLikelyDomain(d.Value) {
 			add(UnifiedEntry{Type: "domain", Value: d.Value, IncidentID: inc.ID, Sources: d.Sources, Confidence: d.Confidence})
-		} else if isValidIP(d.Value) {
+		} else if isPublicIP(d.Value) {
 			add(UnifiedEntry{Type: "ip", Value: d.Value, IncidentID: inc.ID, Sources: d.Sources, Confidence: d.Confidence})
 		}
 	}
 	for _, ip := range inc.Indicators.IPs {
-		if isValidIP(ip.Value) {
+		if isPublicIP(ip.Value) {
 			add(UnifiedEntry{Type: "ip", Value: ip.Value, IncidentID: inc.ID, Sources: ip.Sources, Confidence: ip.Confidence})
 		}
 	}
