@@ -35,11 +35,11 @@ const curatedIndexCap = 5000
 // regardless of severity / actor link.
 const curatedRecentWindow = 90 * 24 * time.Hour
 
-// maxIncidentsPerShard caps the per-shard jsonl size to stay well under GitHub's
-// 100 MB single-file limit. The OSSF malicious-packages dump alone produces
-// ~225k incidents; without sub-sharding it would balloon to ~240 MB.
-// 50k × ~1.1KB/incident ≈ 55 MB per shard — safe margin.
-const maxIncidentsPerShard = 50_000
+// maxIncidentsPerShard caps the per-shard jsonl size to stay under GitHub's
+// 50 MB soft-warning threshold (hard limit is 100 MB). The OSSF malicious-packages
+// dump alone produces ~225k incidents; without sub-sharding it would balloon to
+// ~240 MB. 40k × ~1.1KB/incident ≈ 44 MB per shard — comfortably under 50 MB.
+const maxIncidentsPerShard = 40_000
 
 // WriteAllJSONLShards writes every incident in `incidents` to
 // {outputDir}/incidents/all/{shard}.jsonl, sharded by ID prefix so each file
