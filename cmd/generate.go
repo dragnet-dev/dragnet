@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/dragnet-dev/dragnet/internal/backends"
 	"github.com/dragnet-dev/dragnet/internal/config"
@@ -217,31 +218,30 @@ func loadModuleIncidentsFromShards(modName, incidentsDir string) ([]*incident.In
 }
 
 // writeModuleSTIX builds and writes the per-module combined STIX bundle from
-// pre-loaded incidents. Tier-4 container records (informational, the bulk
-// Trivy DB) are skipped — they have no actionable indicators and including
-// 158k of them in STIX validation adds ~15 min to the run for zero downstream
-// value.
+// pre-loaded incidents. Only "curated" incidents (severe / actor-linked /
+// published in the last 90 days — see index.IsCurated) get a bundle. STIX is
+// for SIEM/TIP ingestion, which wants the actionable subset, not 234k OSV
+// historical advisories — the bulk dataset stays available via the JSONL
+// shards. This drops STIX gen wall time from ~14 min on 290k records to
+// ~30 s on ~14k curated records.
+//
+// We also stopped validating per-incident bundles in this loop because that
+// was the actual cost driver (JSON-schema validation × 290k = blew past the
+// workflow timeout). The combined bundle still gets validated at the end,
+// which catches structural issues.
 func writeModuleSTIX(modName string, incidents []*incident.Incident, stixOutDir string) error {
+	cutoff := time.Now().UTC().Add(-index.CuratedRecentWindow)
 	var bundles []stix.Bundle
-	skipped := 0
+	curated := 0
 	for _, inc := range incidents {
-		if inc.ContainerExt != nil && inc.ContainerExt.Tier == 4 {
-			skipped++
+		if !index.IsCurated(inc, cutoff) {
 			continue
 		}
-		bundle := stix.GenerateBundle(inc)
-		if errs := stix.Validate(bundle); len(errs) > 0 {
-			// Validation errors are logged once per bundle but not per-error
-			// to avoid log floods on the bulk OSV records that legitimately
-			// don't have STIX-shaped indicators.
-			continue
-		}
-		bundles = append(bundles, bundle)
+		curated++
+		bundles = append(bundles, stix.GenerateBundle(inc))
 	}
-	if skipped > 0 {
-		log.Printf("[generate][%s] stix: skipped %d Tier-4 informational records", modName, skipped)
-	}
-	log.Printf("[generate][%s] stix: %d valid bundles of %d incidents", modName, len(bundles), len(incidents))
+	log.Printf("[generate][%s] stix: built %d bundles from %d curated incidents (of %d total)",
+		modName, len(bundles), curated, len(incidents))
 
 	if len(bundles) == 0 {
 		return nil

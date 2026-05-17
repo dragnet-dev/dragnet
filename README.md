@@ -41,30 +41,58 @@ dragnet sync     --module supply        # poll sources for that module
 dragnet enrich   --cross-domain         # link actors / shared IOCs across modules
 dragnet generate --module all --backends all --layers all
                                         # emit Sigma rules, compiled SIEM dialects,
-                                        # IOC feeds, STIX 2.1, and incidents/index.json
+                                        # IOC feeds, STIX 2.1, search index,
+                                        # and incidents/index.json
 dragnet update-popular                  # refresh the "popular packages" baseline
                                         # (download counts, used to score impact)
+dragnet manifest --root .               # write feeds/manifest.json (per-file
+                                        # records/bytes/sha256 for cache invalidation)
 ```
 
-A typical end-to-end run is `validate → sync → enrich → generate`. The cron
-in `dragnet-dev/haul/.github/workflows/sync.yml` runs exactly that on a
-6-hour cycle.
+A typical end-to-end run is `validate → sync → enrich → generate → manifest`.
+The cron in `dragnet-dev/haul/.github/workflows/sync.yml` runs exactly that
+on a 6-hour cycle.
 
 ---
 
 ## Sources (selection)
 
-OSV · GHSA · NVD · CISA KEV · MSRC · OSSF malicious-packages · npm / PyPI /
-cargo / maven registries · MITRE ATT&CK · Trivy DB · Hugging Face ·
-AttackerKB · deps.dev · Snyk · VulnCheck · Docker Hub · ransomware.live ·
-~30 vendor security blogs.
+**Bulk:** OSV (11 ecosystems incl. `GitHub Actions`) · OSSF malicious-packages
+(git-clone walk) · CISA KEV (full catalog every run) · NVD (2-year backfill
+with API key, 1-year without) · GHSA · ransomware.live (full historical
+2020+) · MalwareBazaar / URLhaus (abuse.ch).
+
+**Per-package / registry:** npm · PyPI · cargo · maven · nuget · rubygems ·
+go · hex · packagist · pub.
+
+**Vendor blogs (~30):** wiz, socket, aikido, stepsecurity, sonatype, jfrog,
+sentinelone, crowdstrike, protectai, unit42, mandiant, securelist, microsoft,
+bleepingcomputer, the_hacker_news, krebsonsecurity, dfir_report, elastic_labs,
+eset, sekoia, talos, proofpoint, malwarebytes, polyswarm, project_zero,
+greynoise, horizon3, tenable, watchtowr, etc.
+
+**Container:** Trivy DB (165k OS-package CVEs across alpine/debian/ubuntu/
+amazon/redhat/oracle/suse/photon/azure/wolfi/chainguard) · endoflife.date ·
+Docker Hub popularity.
+
+**Intel:** MITRE ATT&CK (174 actor profiles), Hugging Face (model anomaly
+detection on top-200 popular models, autobootstrapped on first run).
+
+Trivy CLI is a runtime dependency for the container module — install via
+`apt-get install trivy` or equivalent. The bundled trivy-db library walks
+the bbolt schema directly.
 
 Some sources require API keys; set them in the environment:
 
-| Variable               | Source                  |
-|------------------------|-------------------------|
-| `GITHUB_TOKEN`         | `actions/setup-go` rate limits, GHSA, GitHub Actions SHA monitor |
-| `ATTACKERKB_API_KEY`   | AttackerKB extended results (optional; rate-limited subset works without) |
+| Variable                       | Source / Effect |
+|--------------------------------|-----------------|
+| `GITHUB_TOKEN`                 | GHSA + GitHub Actions SHA monitor + rate-limit friendliness on actions/setup-go |
+| `NVD_API_KEY`                  | NVD: 50 req/30s + 2-year backfill (vs 5 req/30s + 1-year unkeyed). Free at nvd.nist.gov/developers/request-an-api-key |
+| `MALWARE_BAZAAR_AUTH_KEY`      | abuse.ch MalwareBazaar `get_recent` endpoint (returns 401 without). Free at auth.abuse.ch |
+| `ATTACKERKB_API_KEY`           | AttackerKB exploit / PoC tracking. Free at attackerkb.com |
+
+Sources without keys gracefully skip with a clear log line — they don't
+error the module.
 
 ---
 
@@ -78,21 +106,61 @@ Datadog. See `internal/backends/registry.go`.
 
 ## Output shape
 
-`dragnet generate` writes into the working directory using the layout that
-[haul](https://github.com/dragnet-dev/haul) expects:
+`dragnet sync` + `dragnet generate` + `dragnet manifest` together write the
+following into the working directory (the haul checkout):
 
 ```
 {module}/
-  incidents/index.json     # IncidentIndex consumed by port + buoy + scope + trawl
-  rules/sigma/             # Source Sigma rules
-  rules/{backend}/         # Compiled per-backend rules
-  feeds/                   # IOC feeds (domains.txt, ips.txt, sha256.txt, unified.json, stix.json)
-incidents/index.json       # Cross-module RootIndex
+  incidents/
+    index.json                       # Curated subset (~5k) for port's main listing
+    all/{shard}[-N].jsonl            # Every merged incident, byte-sharded ≤45MB
+    drafts/{year}/{id}.yaml          # Pending-triage drafts, year-tier sub-dirs
+  lookup/
+    by-package.json                  # {"ecosystem/name": [{id, severity, ...}]}
+                                     # O(1) lookup for buoy/scope/trawl
+  rules/
+    sigma/{layer}/{year}/*.yaml      # Source Sigma rules (exposure/ioc/hunting)
+    {backend}/                       # Compiled per-backend rules
+  feeds/
+    domains.txt, ips.txt, sha256.txt # Streamable IOC lines
+    unified.json                     # Per-IOC enriched view
+    unified.jsonl                    # Same as unified.json, one record per line
+    stix/bundle.json                 # Combined STIX 2.1 bundle (curated subset)
+feeds/
+  manifest.json                      # Per-file records+bytes+sha256, sorted,
+                                     # deterministic — for cache invalidation
+  search-{module}[-N].jsonl          # Per-module search index, byte-sharded
+                                     # (skips Tier-4 container records)
+  unified.json + unified.jsonl       # Cross-module combined IOC feed
+  stix/bundle.json                   # Cross-module combined STIX bundle
+incidents/index.json                 # Cross-module RootIndex
+actors/profiles/*.yaml               # MITRE ATT&CK actor records (174 default)
+state/                               # Resume cursors + sigma-id registry +
+                                     # bootstrap caches (mostly gitignored)
 ```
 
-The JSON shape is owned by `internal/index/generator.go`. Downstream
-consumers (notably `port/src/types.ts`) mirror it; a CI fixture round-trips
-a real `index.json` through the TS types to catch drift.
+The JSON shape is owned by `internal/incident/schema.go` (struct tags
+mirror `yaml:` and `json:` so YAMLs and JSONL shards round-trip
+identically). Downstream consumers (notably `port/src/types.ts`) mirror it;
+a CI fixture round-trips a real `index.json` through the TS types to catch
+drift.
+
+### Container module tiering
+
+Container CVEs are bucketed via `internal/container/filter.go`:
+
+| Tier | Selection                                            | Output |
+|------|------------------------------------------------------|--------|
+| 1    | CISA KEV (actively exploited)                        | Persisted + sigma + IOC + STIX |
+| 2    | CVSS ≥ 9.0 on a popular image                        | Persisted + sigma + IOC + STIX |
+| 3    | CVSS ≥ 7.0 + public PoC on a popular image           | Persisted + sigma + IOC + STIX |
+| 4    | Everything else (~158k Trivy DB records by default)  | Persisted to JSONL shards only |
+
+Tier 4 is the "informational" fallback — full data lives in
+`container/incidents/all/*.jsonl` for cross-reference / lookup but doesn't
+ship as actionable detection rules. Strict filtering (no Tier 4) kicks in
+once you populate `state/popular_images.json` via
+`dragnet update-popular --module container`.
 
 ---
 
@@ -139,22 +207,24 @@ Found a security issue? Email security@dragnet.dev.
 ## Repo layout
 
 ```
-cmd/         Cobra subcommands (sync, generate, validate, enrich, update-popular)
+cmd/         Cobra subcommands (sync, generate, validate, enrich,
+             update-popular, manifest)
 internal/
-  sources/   ~70 source-specific clients implementing sources.Source
-  backends/  ~11 SIEM backends implementing backends.Backend
+  sources/   ~50 source-specific clients implementing sources.Source
+  backends/  11 SIEM backends implementing backends.Backend
   sigma/     Sigma rule generator (canonical IOC normaliser)
   iocutil/   Shared IOC cleaner (used by sources + sigma)
-  incident/  Canonical schema + YAML loader/merger
-  ioc/       IOC export formats (text, JSON, STIX)
-  index/     index.json generator (consumed by port/buoy/scope/trawl)
-  enrichment/ Cross-domain actor + shared-IOC linking
-  actor/     ATT&CK actor profile store
+  incident/  Canonical schema + YAML loader/merger (yaml: + json: tags)
+  ioc/       IOC export formats (text, JSON, JSONL, STIX)
+  index/     index.json + by-package.json + JSONL shards + search index
+  manifest/  feeds/manifest.json builder (deterministic, sha256-stable)
+  enrichment/ Cross-domain actor + shared-IOC + CVE_ID linking
+  actor/     ATT&CK actor profile store (174 profiles)
   confidence/ Source-quality confidence scoring
   container/ Container-specific tiering (Trivy + EOL + KEV)
-  popularity/ Package popularity + impact rating
-  state/     Incremental sync state
-  stix/      STIX 2.1 bundle builder
+  popularity/ Package popularity + impact rating + HF model bootstrap
+  state/     Incremental sync state (per-module cursors)
+  stix/      STIX 2.1 bundle builder (curated subset, not bulk)
   typosquat/ Typosquat candidate detection
   deconflict/ IOC allowlists (private IPs, well-known domains)
 schema/      JSON Schema for incidents (embed.go vendored at runtime)

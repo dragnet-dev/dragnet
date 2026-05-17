@@ -33,7 +33,7 @@ const curatedIndexCap = 5000
 
 // curatedRecentWindow is the rolling window over which all incidents are kept
 // regardless of severity / actor link.
-const curatedRecentWindow = 90 * 24 * time.Hour
+const CuratedRecentWindow = 90 * 24 * time.Hour
 
 // maxShardBytes caps the per-shard jsonl size to stay under GitHub's 50 MB
 // soft-warning threshold (hard limit is 100 MB). Size-based sharding handles
@@ -127,11 +127,11 @@ func writeShardedJSONL(dir, shard string, recs []*incident.Incident) error {
 // `curatedIndexCap`.
 func WriteCuratedIndex(module string, incidents []*incident.Incident, outputDir string) error {
 	now := time.Now().UTC()
-	cutoff := now.Add(-curatedRecentWindow)
+	cutoff := now.Add(-CuratedRecentWindow)
 
 	curated := make([]*incident.Incident, 0, len(incidents))
 	for _, inc := range incidents {
-		if isCurated(inc, cutoff) {
+		if IsCurated(inc, cutoff) {
 			curated = append(curated, inc)
 		}
 	}
@@ -262,7 +262,7 @@ func shardKey(id string) string {
 	return s[:end]
 }
 
-func isCurated(inc *incident.Incident, cutoff time.Time) bool {
+func IsCurated(inc *incident.Incident, cutoff time.Time) bool {
 	switch strings.ToLower(inc.Severity) {
 	case "critical", "high":
 		return true
