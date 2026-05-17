@@ -501,13 +501,30 @@ func runSync(_ *cobra.Command, _ []string) error {
 		genStart := time.Now()
 		log.Printf("[sync][%s] generating rules + IOC feeds for %d incidents", modName, len(incidents))
 
+		// Decide which incidents get sigma rules. Same predicate + cap that
+		// govern STIX bundles and index.json — IsCurated (severe / actor-
+		// linked / last 90 days) sorted by published-date desc, capped at
+		// CuratedIndexCap (5000 per module).
+		//
+		// Why: CVE module was generating 156k sigma rules (628 MB) and
+		// ransomware 112k (448 MB) from per-incident templates. We're a
+		// data hub, not a detection-rule TIP — rules are a useful side-
+		// artifact for the actionable subset, not a per-record obligation
+		// for tens of thousands of historical advisories. Curated-only
+		// brings each module down to ≤30k rules.
+		//
+		// IOC export still runs for all non-Tier-4 incidents below — IOC
+		// feeds want comprehensive coverage of every hash / domain / IP
+		// even from old or low-severity records.
+		sigmaSet := buildSigmaEligibleSet(incidents)
+		log.Printf("[sync][%s] sigma eligibility: %d of %d incidents qualify (curated subset, capped at %d)",
+			modName, len(sigmaSet), len(incidents), index.CuratedIndexCap)
+
 		// Parallel sigma + IOC generation across runtime.NumCPU() workers.
 		// The sigma.Registry is mutex-protected (see internal/sigma/registry.go),
 		// so concurrent gen.Generate() calls are safe — ID-assignment serialises
 		// inside the registry. Each worker does its own template render +
 		// file-write, which is the actual cost driver and parallelises cleanly.
-		// Container module (~7k Tier-1/2/3 records after Tier-4 skip) drops
-		// from ~11 min serial to ~3 min on a 4-core runner.
 		workers := runtime.NumCPU()
 		if workers > 8 {
 			workers = 8
@@ -520,10 +537,11 @@ func runSync(_ *cobra.Command, _ []string) error {
 		}
 
 		var (
-			processed     atomic.Int64
-			skippedTier4  atomic.Int64
-			genWG         sync.WaitGroup
-			incidentsChan = make(chan *incident.Incident, workers*2)
+			processed         atomic.Int64
+			skippedTier4      atomic.Int64
+			skippedNonCurated atomic.Int64
+			genWG             sync.WaitGroup
+			incidentsChan     = make(chan *incident.Incident, workers*2)
 		)
 
 		// Progress reporter — emits one line every ~20k records, no per-incident logs.
@@ -557,20 +575,21 @@ func runSync(_ *cobra.Command, _ []string) error {
 						log.Printf("[sync][%s] dry-run: would generate rules for %s", modName, inc.ID)
 						continue
 					}
-					// Skip sigma rule generation AND IOC export for Tier 4
-					// (informational) container records. The bulk Trivy DB
-					// (~165k CVEs) lands in this tier when no popular-images
-					// snapshot is configured; doing per-incident sigma + IOC
-					// export for all of them dominates workflow runtime
-					// (~20 min). They still land in incidents/all/*.jsonl
-					// for cross-reference — they just don't ship as
-					// actionable detection rules or IOC feeds.
+					// Tier-4 container records skip BOTH sigma and IOC — they
+					// have no actionable indicators (just OS-package CVE
+					// metadata) and there's ~158k of them on a first sync.
 					if inc.ContainerExt != nil && inc.ContainerExt.Tier == 4 {
 						skippedTier4.Add(1)
 						continue
 					}
-					if err := gen.Generate(inc); err != nil {
-						log.Printf("[sync][%s] generate %s: %v", modName, inc.ID, err)
+					// Sigma rule generation is curated-only. IOC export still
+					// runs below for everything else.
+					if sigmaSet[inc.ID] {
+						if err := gen.Generate(inc); err != nil {
+							log.Printf("[sync][%s] generate %s: %v", modName, inc.ID, err)
+						}
+					} else {
+						skippedNonCurated.Add(1)
 					}
 					if inc.ContainerExt != nil {
 						if err := iocExp.ExportContainerImages(inc, feedsDir); err != nil {
@@ -593,6 +612,9 @@ func runSync(_ *cobra.Command, _ []string) error {
 
 		if t4 := skippedTier4.Load(); t4 > 0 {
 			log.Printf("[sync][%s] skipped sigma+IOC for %d Tier-4 informational records", modName, t4)
+		}
+		if nc := skippedNonCurated.Load(); nc > 0 {
+			log.Printf("[sync][%s] skipped sigma (kept IOC) for %d non-curated records", modName, nc)
 		}
 		log.Printf("[sync][%s] generate: done in %s", modName, time.Since(genStart).Round(time.Second))
 
@@ -1022,6 +1044,35 @@ func enrichContainerIncidents(
 }
 
 // fileExists reports whether a file exists at path.
+// buildSigmaEligibleSet returns the set of incident IDs that should produce
+// sigma rules — same filter + cap as the STIX bundle and the curated
+// index.json (IsCurated → sort by published desc → cap at CuratedIndexCap).
+// IOC export runs on every non-Tier-4 incident regardless; only the sigma
+// gen path is gated.
+//
+// Without this gate, CVE generates ~6 rules per incident × 24k incidents =
+// 156k rule files (628 MB). With it: ≤5000 × ~6 = ≤30k per module.
+func buildSigmaEligibleSet(incidents []*incident.Incident) map[string]bool {
+	cutoff := time.Now().UTC().Add(-index.CuratedRecentWindow)
+	curated := make([]*incident.Incident, 0, len(incidents))
+	for _, inc := range incidents {
+		if index.IsCurated(inc, cutoff) {
+			curated = append(curated, inc)
+		}
+	}
+	sort.Slice(curated, func(i, j int) bool {
+		return index.PublishedAt(curated[i]).After(index.PublishedAt(curated[j]))
+	})
+	if len(curated) > index.CuratedIndexCap {
+		curated = curated[:index.CuratedIndexCap]
+	}
+	set := make(map[string]bool, len(curated))
+	for _, inc := range curated {
+		set[inc.ID] = true
+	}
+	return set
+}
+
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
