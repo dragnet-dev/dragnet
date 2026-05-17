@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -37,7 +38,12 @@ import (
 // build the per-source context, but several sources have local processing
 // loops that don't honour ctx.Done(); allSourcesDeadline below is the hard
 // safety net for those.
-const perSourceFetchTimeout = 90 * time.Second
+// perSourceFetchTimeout was bumped from 90s to 150s once NVD's 2-year
+// paginated backfill landed: ~6 windows × up to 4 pages × ~1.5s req +
+// 1s pause = comfortably ~50s steady-state, but first-run / slow days
+// can push past 90s and lose all NVD data. 150s gives headroom without
+// being absurd; the allSourcesDeadline (5 min) still caps the module.
+const perSourceFetchTimeout = 150 * time.Second
 
 // allSourcesDeadline is the absolute wall-clock budget for the parallel-fetch
 // stage of one module. After this, the wg.Wait() bails out, abandons any
@@ -234,6 +240,10 @@ func runSync(_ *cobra.Command, _ []string) error {
 			fetchErrCount int32
 			wg            sync.WaitGroup
 			pending       sync.Map // src.Name() -> startTime for any source still running
+			// Per-source results captured so we can print a single-line health
+			// summary at the end of the module. Without it, silent failures
+			// (source returns 0 with no error) are buried in 100s of log lines.
+			srcStats sync.Map // src.Name() -> srcResult
 		)
 		sem := make(chan struct{}, 10)
 		for _, src := range srcs {
@@ -253,9 +263,11 @@ func runSync(_ *cobra.Command, _ []string) error {
 				if err != nil {
 					log.Printf("[sync][%s] %s: %v (skipping after %s)", modName, s.Name(), err, dur)
 					atomic.AddInt32(&fetchErrCount, 1)
+					srcStats.Store(s.Name(), srcResult{count: 0, err: err.Error()})
 					return
 				}
 				log.Printf("[sync][%s] %s: fetched %d incidents in %s", modName, s.Name(), len(got), dur)
+				srcStats.Store(s.Name(), srcResult{count: len(got)})
 				mu.Lock()
 				incidents = append(incidents, got...)
 				mu.Unlock()
@@ -304,6 +316,10 @@ func runSync(_ *cobra.Command, _ []string) error {
 					modName, len(pendingNames), strings.Join(pendingNames, ", "))
 			}
 		}
+
+		// Source-health summary: a single line that makes silent zero-return
+		// failures visible without grepping the per-source lines above.
+		logSourceHealth(modName, &srcStats)
 
 		// OSV package enrichment for the supply module.
 		//
@@ -580,6 +596,51 @@ func runSync(_ *cobra.Command, _ []string) error {
 // loadActorStore fetches the MITRE ATT&CK bundle (ETag-cached) and returns an
 // actor store. Falls back to on-disk profiles when the bundle is unchanged.
 // Returns (store, newETag) — newETag is empty when no download occurred.
+// srcResult is the per-source outcome captured during the parallel fetch loop.
+type srcResult struct {
+	count int
+	err   string // empty when the fetch succeeded
+}
+
+// logSourceHealth emits one summary line per module: how many sources were OK,
+// how many returned zero records, and how many errored. Silent failures are the
+// most expensive failure mode in this pipeline (a source quietly returns 0 and
+// the module empties out); this is the line that surfaces them at a glance.
+func logSourceHealth(modName string, srcStats *sync.Map) {
+	type entry struct {
+		name string
+		r    srcResult
+	}
+	var rows []entry
+	srcStats.Range(func(k, v any) bool {
+		rows = append(rows, entry{name: k.(string), r: v.(srcResult)})
+		return true
+	})
+	sort.Slice(rows, func(i, j int) bool { return rows[i].name < rows[j].name })
+
+	var ok, empty, errored []string
+	for _, e := range rows {
+		switch {
+		case e.r.err != "":
+			errored = append(errored, e.name)
+		case e.r.count == 0:
+			empty = append(empty, e.name)
+		default:
+			ok = append(ok, fmt.Sprintf("%s(%d)", e.name, e.r.count))
+		}
+	}
+	log.Printf("[sync][%s] source health: %d OK / %d empty / %d errored", modName, len(ok), len(empty), len(errored))
+	if len(ok) > 0 {
+		log.Printf("[sync][%s]   ok:      %s", modName, strings.Join(ok, ", "))
+	}
+	if len(empty) > 0 {
+		log.Printf("[sync][%s]   empty:   %s", modName, strings.Join(empty, ", "))
+	}
+	if len(errored) > 0 {
+		log.Printf("[sync][%s]   errored: %s", modName, strings.Join(errored, ", "))
+	}
+}
+
 func loadActorStore(ctx context.Context, lastETag string) (*actor.Store, string) {
 	profiles, newETag, err := mitre.New().FetchActors(ctx, lastETag)
 	if err != nil {
@@ -838,7 +899,17 @@ func enrichContainerIncidents(
 			cfg,
 		)
 		if tier == 0 {
-			continue // below threshold
+			// When no popular-images snapshot is configured we keep the
+			// record as informational (Tier 4) rather than discarding it —
+			// otherwise the entire ~165k Trivy DB drops silently before
+			// haul ever sees it. Configure a snapshot via
+			// `dragnet update-popular --module container` to enable strict
+			// Tier 1/2/3 filtering.
+			if len(popularImages) == 0 {
+				inc.ContainerExt.Tier = 4
+				out = append(out, inc)
+			}
+			continue
 		}
 		inc.ContainerExt.Tier = tier
 		out = append(out, inc)
