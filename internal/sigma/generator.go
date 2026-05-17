@@ -163,6 +163,8 @@ func render(tmpl *template.Template, data TemplateData) (string, error) {
 }
 
 // writeRule renders a template and writes the result to outputDir/subdir/filename.
+// Skips the write when the existing file's bytes already match — avoids
+// dirtying git's index on stable rules across consecutive runs.
 func (g *Generator) writeRule(tmplPath, subdir, filename string, data TemplateData) error {
 	tmpl, err := loadTemplate(tmplPath)
 	if err != nil {
@@ -177,7 +179,11 @@ func (g *Generator) writeRule(tmplPath, subdir, filename string, data TemplateDa
 		return fmt.Errorf("creating directory %s: %w", dir, err)
 	}
 	outPath := filepath.Join(dir, filename)
-	if err := os.WriteFile(outPath, []byte(content), 0o644); err != nil {
+	newBytes := []byte(content)
+	if existing, err := os.ReadFile(outPath); err == nil && bytes.Equal(existing, newBytes) {
+		return nil
+	}
+	if err := os.WriteFile(outPath, newBytes, 0o644); err != nil {
 		return fmt.Errorf("writing %s: %w", outPath, err)
 	}
 	return nil

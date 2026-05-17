@@ -8,7 +8,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dragnet-dev/dragnet/internal/incident"
@@ -37,11 +39,12 @@ func (c *Client) Fetch(ctx context.Context, since time.Time) ([]*incident.Incide
 		return nil, err
 	}
 
-	var incidents []*incident.Incident
+	// Two-phase: collect file paths first (cheap walk), then parse in
+	// parallel workers (the actual cost). 225k JSON parses at ~250µs each
+	// is ~57s serial; on a 4-core runner with workers, ~15s.
+	var paths []string
 	visited := 0
-	err := filepath.WalkDir(filepath.Join(dir, "osv"), func(path string, d fs.DirEntry, err error) error {
-		// Honour ctx cancellation every 256 entries so a cancelled parent
-		// stops the walk promptly instead of plowing through ~5k JSON files.
+	walkErr := filepath.WalkDir(filepath.Join(dir, "osv"), func(path string, d fs.DirEntry, err error) error {
 		visited++
 		if visited&0xff == 0 {
 			if cerr := ctx.Err(); cerr != nil {
@@ -54,28 +57,66 @@ func (c *Client) Fetch(ctx context.Context, since time.Time) ([]*incident.Incide
 		if d.IsDir() || !strings.HasSuffix(path, ".json") {
 			return nil
 		}
+		paths = append(paths, path)
+		return nil
+	})
+	if walkErr != nil {
+		return nil, walkErr
+	}
 
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return nil
+	workers := runtime.NumCPU()
+	if workers > 8 {
+		workers = 8
+	}
+	if workers > len(paths) {
+		workers = len(paths)
+	}
+	if workers < 1 {
+		workers = 1
+	}
+
+	results := make([]*incident.Incident, len(paths))
+	jobs := make(chan int, workers*2)
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range jobs {
+				data, err := os.ReadFile(paths[i])
+				if err != nil {
+					continue
+				}
+				var entry ossfEntry
+				if err := json.Unmarshal(data, &entry); err != nil {
+					continue
+				}
+				if entry.Modified.Before(since) {
+					continue
+				}
+				results[i] = ossfToIncident(&entry)
+			}
+		}()
+	}
+	for i := range paths {
+		select {
+		case <-ctx.Done():
+			close(jobs)
+			wg.Wait()
+			return nil, ctx.Err()
+		case jobs <- i:
 		}
+	}
+	close(jobs)
+	wg.Wait()
 
-		var entry ossfEntry
-		if err := json.Unmarshal(data, &entry); err != nil {
-			return nil
-		}
-
-		if entry.Modified.Before(since) {
-			return nil
-		}
-
-		inc := ossfToIncident(&entry)
+	incidents := make([]*incident.Incident, 0, len(results))
+	for _, inc := range results {
 		if inc != nil {
 			incidents = append(incidents, inc)
 		}
-		return nil
-	})
-	return incidents, err
+	}
+	return incidents, nil
 }
 
 // cloneOrPull clones the OSSF repo on first run, then pulls the delta on subsequent runs.

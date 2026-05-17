@@ -26,10 +26,12 @@ import (
 	"github.com/dragnet-dev/dragnet/internal/incident"
 )
 
-// curatedIndexCap is the maximum number of IncidentSummary records emitted into
-// index.json. Anything beyond this stays accessible via all/{shard}.jsonl but
-// won't be in the front-page listing.
-const curatedIndexCap = 5000
+// CuratedIndexCap is the maximum number of records in the curated subset
+// (per module). index.json caps to this; STIX generation in cmd/generate.go
+// also reuses it so the STIX bundle stays as the "actionable, recent" view
+// rather than including the full bulk dataset. Anything beyond stays
+// accessible via all/{shard}.jsonl.
+const CuratedIndexCap = 5000
 
 // curatedRecentWindow is the rolling window over which all incidents are kept
 // regardless of severity / actor link.
@@ -52,6 +54,13 @@ func WriteAllJSONLShards(incidents []*incident.Incident, outputDir string) error
 		return fmt.Errorf("mkdir all/: %w", err)
 	}
 
+	// Sort by ID once so shard contents are deterministic across runs even
+	// though MergeAll's union-find iteration is map-based and gives a random
+	// upstream order. Without this, every sync produces a byte-different
+	// shard file (same content, different line ordering) — git treats it as
+	// a diff every time, ballooning the commit + push.
+	sort.Slice(incidents, func(i, j int) bool { return incidents[i].ID < incidents[j].ID })
+
 	// Wipe stale shards first so a shrinking dataset doesn't leave orphans.
 	entries, _ := os.ReadDir(dir)
 	for _, e := range entries {
@@ -61,6 +70,9 @@ func WriteAllJSONLShards(incidents []*incident.Incident, outputDir string) error
 	}
 
 	// Bucket by shard key, then write each bucket as one .jsonl file.
+	// Bucket-key iteration order doesn't matter — each shard is its own
+	// file and we sort the incidents inside each shard by their (already
+	// sorted) input order.
 	buckets := map[string][]*incident.Incident{}
 	for _, inc := range incidents {
 		buckets[shardKey(inc.ID)] = append(buckets[shardKey(inc.ID)], inc)
@@ -124,7 +136,7 @@ func writeShardedJSONL(dir, shard string, recs []*incident.Incident) error {
 // Selection criteria (union): published in the last `curatedRecentWindow`, OR
 // severity in {critical, high}, OR linked to at least one ATT&CK actor. After
 // filtering, the list is sorted by published date desc and capped at
-// `curatedIndexCap`.
+// `CuratedIndexCap`.
 func WriteCuratedIndex(module string, incidents []*incident.Incident, outputDir string) error {
 	now := time.Now().UTC()
 	cutoff := now.Add(-CuratedRecentWindow)
@@ -137,10 +149,10 @@ func WriteCuratedIndex(module string, incidents []*incident.Incident, outputDir 
 	}
 
 	sort.Slice(curated, func(i, j int) bool {
-		return publishedAt(curated[i]).After(publishedAt(curated[j]))
+		return PublishedAt(curated[i]).After(PublishedAt(curated[j]))
 	})
-	if len(curated) > curatedIndexCap {
-		curated = curated[:curatedIndexCap]
+	if len(curated) > CuratedIndexCap {
+		curated = curated[:CuratedIndexCap]
 	}
 
 	idx := ModuleIndex{
@@ -181,6 +193,9 @@ type ByPackageEntry struct {
 // WriteByPackageLookup writes {outputDir}/lookup/by-package.json. Keys are
 // "ecosystem/name"; values are ordered lists of brief incident metadata.
 func WriteByPackageLookup(incidents []*incident.Incident, outputDir string) error {
+	// Deterministic — see comment in WriteAllJSONLShards.
+	sort.Slice(incidents, func(i, j int) bool { return incidents[i].ID < incidents[j].ID })
+
 	lookup := map[string][]ByPackageEntry{}
 	for _, inc := range incidents {
 		entry := ByPackageEntry{
@@ -270,13 +285,13 @@ func IsCurated(inc *incident.Incident, cutoff time.Time) bool {
 	if len(inc.ActorIDs) > 0 {
 		return true
 	}
-	if t := publishedAt(inc); !t.IsZero() && t.After(cutoff) {
+	if t := PublishedAt(inc); !t.IsZero() && t.After(cutoff) {
 		return true
 	}
 	return false
 }
 
-func publishedAt(inc *incident.Incident) time.Time {
+func PublishedAt(inc *incident.Incident) time.Time {
 	if inc.CompromiseWindow.Start == "" {
 		return time.Time{}
 	}

@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -499,43 +500,99 @@ func runSync(_ *cobra.Command, _ []string) error {
 
 		genStart := time.Now()
 		log.Printf("[sync][%s] generating rules + IOC feeds for %d incidents", modName, len(incidents))
-		skippedTier4 := 0
-		for i, inc := range incidents {
-			// Progress every 20k for the bulk case (264k OSV advisories).
-			if i > 0 && i%20_000 == 0 {
-				log.Printf("[sync][%s] generate progress: %d/%d (%s elapsed)", modName, i, len(incidents), time.Since(genStart).Round(time.Second))
-			}
-			if syncDryRun {
-				log.Printf("[sync][%s] dry-run: would generate rules for %s", modName, inc.ID)
-				continue
-			}
-			// Skip sigma rule generation AND IOC export for Tier 4
-			// (informational) container records. The bulk Trivy DB (~165k
-			// CVEs) lands in this tier when no popular-images snapshot is
-			// configured; doing per-incident sigma + IOC export for all of
-			// them dominates the workflow runtime (~20 min). They still land
-			// in incidents/all/*.jsonl for cross-reference — they just don't
-			// ship as actionable detection rules or get listed in the
-			// IOC feeds.
-			if inc.ContainerExt != nil && inc.ContainerExt.Tier == 4 {
-				skippedTier4++
-				continue
-			}
-			if err := gen.Generate(inc); err != nil {
-				log.Printf("[sync][%s] generate %s: %v", modName, inc.ID, err)
-			}
-			if inc.ContainerExt != nil {
-				if err := iocExp.ExportContainerImages(inc, feedsDir); err != nil {
-					log.Printf("[sync][%s] container export %s: %v", modName, inc.ID, err)
-				}
-			} else {
-				if err := iocExp.Export(inc, feedsDir); err != nil {
-					log.Printf("[sync][%s] ioc export %s: %v", modName, inc.ID, err)
-				}
-			}
+
+		// Parallel sigma + IOC generation across runtime.NumCPU() workers.
+		// The sigma.Registry is mutex-protected (see internal/sigma/registry.go),
+		// so concurrent gen.Generate() calls are safe — ID-assignment serialises
+		// inside the registry. Each worker does its own template render +
+		// file-write, which is the actual cost driver and parallelises cleanly.
+		// Container module (~7k Tier-1/2/3 records after Tier-4 skip) drops
+		// from ~11 min serial to ~3 min on a 4-core runner.
+		workers := runtime.NumCPU()
+		if workers > 8 {
+			workers = 8
 		}
-		if skippedTier4 > 0 {
-			log.Printf("[sync][%s] skipped sigma+IOC for %d Tier-4 informational records", modName, skippedTier4)
+		if workers > len(incidents) {
+			workers = len(incidents)
+		}
+		if workers < 1 {
+			workers = 1
+		}
+
+		var (
+			processed     atomic.Int64
+			skippedTier4  atomic.Int64
+			genWG         sync.WaitGroup
+			incidentsChan = make(chan *incident.Incident, workers*2)
+		)
+
+		// Progress reporter — emits one line every ~20k records, no per-incident logs.
+		progressDone := make(chan struct{})
+		go func() {
+			ticker := time.NewTicker(30 * time.Second)
+			defer ticker.Stop()
+			lastReported := int64(0)
+			for {
+				select {
+				case <-progressDone:
+					return
+				case <-ticker.C:
+					n := processed.Load()
+					if n-lastReported >= 20_000 || (n > 0 && lastReported == 0) {
+						log.Printf("[sync][%s] generate progress: %d/%d (%s elapsed)",
+							modName, n, len(incidents), time.Since(genStart).Round(time.Second))
+						lastReported = n
+					}
+				}
+			}
+		}()
+
+		for w := 0; w < workers; w++ {
+			genWG.Add(1)
+			go func() {
+				defer genWG.Done()
+				for inc := range incidentsChan {
+					processed.Add(1)
+					if syncDryRun {
+						log.Printf("[sync][%s] dry-run: would generate rules for %s", modName, inc.ID)
+						continue
+					}
+					// Skip sigma rule generation AND IOC export for Tier 4
+					// (informational) container records. The bulk Trivy DB
+					// (~165k CVEs) lands in this tier when no popular-images
+					// snapshot is configured; doing per-incident sigma + IOC
+					// export for all of them dominates workflow runtime
+					// (~20 min). They still land in incidents/all/*.jsonl
+					// for cross-reference — they just don't ship as
+					// actionable detection rules or IOC feeds.
+					if inc.ContainerExt != nil && inc.ContainerExt.Tier == 4 {
+						skippedTier4.Add(1)
+						continue
+					}
+					if err := gen.Generate(inc); err != nil {
+						log.Printf("[sync][%s] generate %s: %v", modName, inc.ID, err)
+					}
+					if inc.ContainerExt != nil {
+						if err := iocExp.ExportContainerImages(inc, feedsDir); err != nil {
+							log.Printf("[sync][%s] container export %s: %v", modName, inc.ID, err)
+						}
+					} else {
+						if err := iocExp.Export(inc, feedsDir); err != nil {
+							log.Printf("[sync][%s] ioc export %s: %v", modName, inc.ID, err)
+						}
+					}
+				}
+			}()
+		}
+		for _, inc := range incidents {
+			incidentsChan <- inc
+		}
+		close(incidentsChan)
+		genWG.Wait()
+		close(progressDone)
+
+		if t4 := skippedTier4.Load(); t4 > 0 {
+			log.Printf("[sync][%s] skipped sigma+IOC for %d Tier-4 informational records", modName, t4)
 		}
 		log.Printf("[sync][%s] generate: done in %s", modName, time.Since(genStart).Round(time.Second))
 
