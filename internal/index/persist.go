@@ -35,11 +35,13 @@ const curatedIndexCap = 5000
 // regardless of severity / actor link.
 const curatedRecentWindow = 90 * 24 * time.Hour
 
-// maxIncidentsPerShard caps the per-shard jsonl size to stay under GitHub's
-// 50 MB soft-warning threshold (hard limit is 100 MB). The OSSF malicious-packages
-// dump alone produces ~225k incidents; without sub-sharding it would balloon to
-// ~240 MB. 40k × ~1.1KB/incident ≈ 44 MB per shard — comfortably under 50 MB.
-const maxIncidentsPerShard = 40_000
+// maxShardBytes caps the per-shard jsonl size to stay under GitHub's 50 MB
+// soft-warning threshold (hard limit is 100 MB). Size-based sharding handles
+// the wide variance in record size — npm advisories are ~1 KB each, but a
+// single Trivy CVE that affects 30+ OS-version tuples runs to ~3 KB. Without
+// size-based capping, a Trivy shard of 40k records hits ~100 MB and triggers
+// GitHub's reject path.
+const maxShardBytes = 45 * 1024 * 1024 // 45 MB, leaves headroom under 50 MB warning
 
 // WriteAllJSONLShards writes every incident in `incidents` to
 // {outputDir}/incidents/all/{shard}.jsonl, sharded by ID prefix so each file
@@ -65,28 +67,55 @@ func WriteAllJSONLShards(incidents []*incident.Incident, outputDir string) error
 	}
 
 	for shard, recs := range buckets {
-		// Sub-shard if a single bucket would exceed our per-file budget.
-		// Names go {prefix}.jsonl when one part is enough, otherwise
-		// {prefix}-0.jsonl, {prefix}-1.jsonl, etc.
-		if len(recs) <= maxIncidentsPerShard {
-			path := filepath.Join(dir, shard+".jsonl")
-			if err := writeJSONL(path, recs); err != nil {
-				return fmt.Errorf("write %s: %w", path, err)
-			}
-			continue
-		}
-		for i, off := 0, 0; off < len(recs); i, off = i+1, off+maxIncidentsPerShard {
-			end := off + maxIncidentsPerShard
-			if end > len(recs) {
-				end = len(recs)
-			}
-			path := filepath.Join(dir, fmt.Sprintf("%s-%d.jsonl", shard, i))
-			if err := writeJSONL(path, recs[off:end]); err != nil {
-				return fmt.Errorf("write %s: %w", path, err)
-			}
+		// Stream into sub-shards, opening a new one when the current one
+		// crosses maxShardBytes. First sub-shard is {prefix}.jsonl; if a
+		// second one is needed we rename it to {prefix}-0.jsonl and continue
+		// with -1, -2, ...
+		if err := writeShardedJSONL(dir, shard, recs); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+// writeShardedJSONL writes recs into one or more {dir}/{shard}[-N].jsonl files,
+// rolling to the next sub-shard when the current file would exceed
+// maxShardBytes. Returns the first IO error encountered.
+func writeShardedJSONL(dir, shard string, recs []*incident.Incident) error {
+	if len(recs) == 0 {
+		return nil
+	}
+	subIdx := 0
+	subStart := 0
+	subBytes := 0
+	flush := func(end int) error {
+		var name string
+		if subIdx == 0 && end == len(recs) {
+			name = shard + ".jsonl" // single shard, no suffix
+		} else {
+			name = fmt.Sprintf("%s-%d.jsonl", shard, subIdx)
+		}
+		path := filepath.Join(dir, name)
+		return writeJSONL(path, recs[subStart:end])
+	}
+	for i, r := range recs {
+		bytes, err := json.Marshal(r)
+		if err != nil {
+			return fmt.Errorf("marshal %s: %w", r.ID, err)
+		}
+		// +1 for newline. If this record would push us over the budget AND
+		// we already have at least one record in the current sub-shard, flush.
+		if subBytes > 0 && subBytes+len(bytes)+1 > maxShardBytes {
+			if err := flush(i); err != nil {
+				return err
+			}
+			subIdx++
+			subStart = i
+			subBytes = 0
+		}
+		subBytes += len(bytes) + 1
+	}
+	return flush(len(recs))
 }
 
 // WriteCuratedIndex writes {outputDir}/incidents/index.json with a curated
