@@ -186,6 +186,7 @@ func generateModuleSTIX(modName, incidentsDir, stixOutDir string) ([]*incident.I
 	var bundles []stix.Bundle
 	var incidents []*incident.Incident
 
+	// Source 1: walk per-incident YAMLs (legacy / drafts that got merged).
 	err := filepath.WalkDir(incidentsDir, func(path string, d os.DirEntry, err error) error {
 		if err != nil || d.IsDir() || !strings.HasSuffix(path, ".yaml") {
 			return err
@@ -200,28 +201,44 @@ func generateModuleSTIX(modName, incidentsDir, stixOutDir string) ([]*incident.I
 			return nil
 		}
 		incidents = append(incidents, inc)
+		return nil
+	})
+	if err != nil {
+		return incidents, err
+	}
 
+	// Source 2: load the new all/*.jsonl shards — these are the authoritative
+	// merged dataset written by sync. Without this, STIX generation only sees
+	// the (mostly empty) per-incident YAML tree and emits an empty bundle.
+	allDir := filepath.Join(incidentsDir, "all")
+	if entries, _ := os.ReadDir(allDir); len(entries) > 0 {
+		for _, e := range entries {
+			if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") {
+				continue
+			}
+			loaded, err := loadIncidentsJSONL(filepath.Join(allDir, e.Name()))
+			if err != nil {
+				log.Printf("[generate][%s] stix load %s: %v", modName, e.Name(), err)
+				continue
+			}
+			incidents = append(incidents, loaded...)
+		}
+		log.Printf("[generate][%s] stix: loaded %d incidents from all/ shards", modName, len(incidents))
+	}
+
+	for _, inc := range incidents {
 		bundle := stix.GenerateBundle(inc)
 		if errs := stix.Validate(bundle); len(errs) > 0 {
 			for _, e := range errs {
 				log.Printf("[generate][%s] stix %s: %s", modName, inc.ID, e)
 			}
-			return nil
+			continue
 		}
 		bundles = append(bundles, bundle)
 
-		data, err := json.MarshalIndent(bundle, "", "  ")
-		if err != nil {
-			return err
-		}
-		dest := filepath.Join(stixOutDir, inc.ID+".json")
-		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
-			return err
-		}
-		return os.WriteFile(dest, data, 0o644)
-	})
-	if err != nil {
-		return incidents, err
+		// Skip per-incident STIX file writes on the bulk path — 250k tiny
+		// JSON files would dwarf the repo. The combined bundle below is the
+		// useful artifact for downstream consumers.
 	}
 
 	if len(bundles) == 0 {
@@ -244,6 +261,26 @@ func generateModuleSTIX(modName, incidentsDir, stixOutDir string) ([]*incident.I
 		return incidents, err
 	}
 	return incidents, os.WriteFile(dest, data, 0o644)
+}
+
+// loadIncidentsJSONL parses one shard file (newline-delimited JSON Incidents)
+// from the sync's persist output and returns the records.
+func loadIncidentsJSONL(path string) ([]*incident.Incident, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	var out []*incident.Incident
+	dec := json.NewDecoder(f)
+	for dec.More() {
+		var inc incident.Incident
+		if err := dec.Decode(&inc); err != nil {
+			return out, err
+		}
+		out = append(out, &inc)
+	}
+	return out, nil
 }
 
 func generateRootSTIX(allModules map[string][]*incident.Incident) error {
