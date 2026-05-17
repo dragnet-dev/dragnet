@@ -13,7 +13,7 @@ type Parser struct{ inner *blogs.GenericParser }
 func New() *Parser {
 	return &Parser{inner: blogs.NewGenericParser(
 		"polyswarm",
-		"https://polyswarm.network/blog/feed",
+		"https://polyswarm.network/feed",
 		malwareKeywords,
 	)}
 }

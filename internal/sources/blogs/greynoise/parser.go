@@ -11,7 +11,7 @@ type Parser struct{ inner *blogs.GenericParser }
 func New() *Parser {
 	return &Parser{inner: blogs.NewGenericParser(
 		"greynoise",
-		"https://greynoise.io/blog/feed",
+		"https://www.greynoise.io/blog/rss.xml",
 		keywords,
 	)}
 }

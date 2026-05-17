@@ -12,7 +12,7 @@ type Parser struct{ inner *blogs.GenericParser }
 func New() *Parser {
 	return &Parser{inner: blogs.NewGenericParser(
 		"secureworks",
-		"https://news.sophos.com/en-us/category/threat-research/feed/",
+		"https://www.secureworks.com/blog/feed",
 		keywords,
 	)}
 }

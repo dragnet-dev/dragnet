@@ -11,7 +11,7 @@ type Parser struct{ inner *blogs.GenericParser }
 func New() *Parser {
 	return &Parser{inner: blogs.NewGenericParser(
 		"tenable",
-		"https://tenable.com/blog/feed",
+		"https://www.tenable.com/blog/feed",
 		keywords,
 	)}
 }

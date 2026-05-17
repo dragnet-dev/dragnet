@@ -11,7 +11,7 @@ type Parser struct{ inner *blogs.GenericParser }
 func New() *Parser {
 	return &Parser{inner: blogs.NewGenericParser(
 		"corvus",
-		"https://corvusinsurance.com/blog/feed",
+		"https://www.corvusinsurance.com/blog/rss.xml",
 		keywords,
 	)}
 }
