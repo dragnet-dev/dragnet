@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	urlpkg "net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -32,10 +33,11 @@ var osvEcoName = map[string]string{
 	"maven":     "Maven",
 	"nuget":     "NuGet",
 	"rubygems":  "RubyGems",
-	"go":        "Go",
-	"hex":       "Hex",
-	"packagist": "Packagist",
-	"pub":       "Pub",
+	"go":             "Go",
+	"hex":            "Hex",
+	"packagist":      "Packagist",
+	"pub":            "Pub",
+	"github-actions": "GitHub Actions",
 }
 
 // localEcoName maps OSV ecosystem names back to our internal names.
@@ -46,16 +48,24 @@ var localEcoName = map[string]string{
 	"Maven":     "maven",
 	"NuGet":     "nuget",
 	"RubyGems":  "rubygems",
-	"Go":        "go",
-	"Hex":       "hex",
-	"Packagist": "packagist",
-	"Pub":       "pub",
+	"Go":             "go",
+	"Hex":            "hex",
+	"Packagist":      "packagist",
+	"Pub":            "pub",
+	"GitHub Actions": "github-actions",
 }
 
 // bulkEcosystems are the ecosystems for which OSV publishes bulk exports.
+//
+// IMPORTANT: this is the canonical source of "package advisory" coverage for
+// haul. Before adding another narrow advisory source (deps.dev, ecosystem-
+// specific aggregators), check whether OSV already covers it here — most
+// upstream advisory feeds end up in OSV within hours. Removed sources that
+// duplicated this coverage: deps_dev (v3alpha retired), msrc (NVD covers).
 var bulkEcosystems = []string{
 	"npm", "PyPI", "crates.io",
 	"Maven", "NuGet", "RubyGems", "Go", "Hex", "Packagist", "Pub",
+	"GitHub Actions", // CI workflow action advisories
 }
 
 // Client implements the Source interface for OSV.
@@ -106,7 +116,9 @@ func (c *Client) fetchBulk(ctx context.Context, since time.Time) ([]*incident.In
 
 // fetchEcosystem downloads and parses the all.zip for a single OSV ecosystem.
 func (c *Client) fetchEcosystem(ctx context.Context, eco string, since time.Time) ([]*incident.Incident, error) {
-	url := fmt.Sprintf("%s/%s/all.zip", bulkBase, eco)
+	// Path-escape `eco` so ecosystems with spaces (e.g. "GitHub Actions") work.
+	// Without this, the literal space in the URL would 000 the request.
+	url := fmt.Sprintf("%s/%s/all.zip", bulkBase, urlpkg.PathEscape(eco))
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {

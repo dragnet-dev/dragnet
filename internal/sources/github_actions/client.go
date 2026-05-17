@@ -1,7 +1,6 @@
 package github_actions
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -15,11 +14,7 @@ import (
 	"github.com/dragnet-dev/dragnet/internal/incident"
 )
 
-const (
-	osvAPIURL  = "https://api.osv.dev/v1/query"
-	githubAPI  = "https://api.github.com"
-	ecosystem  = "GitHub Actions"
-)
+const githubAPI = "https://api.github.com"
 
 // PopularAction is one entry in state/popular_actions.json.
 type PopularAction struct {
@@ -52,13 +47,12 @@ func (c *Client) Name() string { return "github_actions" }
 func (c *Client) Fetch(ctx context.Context, since time.Time) ([]*incident.Incident, error) {
 	var out []*incident.Incident
 
-	adv, err := c.queryOSVAdvisories(ctx, since)
-	if err != nil {
-		log.Printf("[github_actions] OSV query error: %v", err)
-	} else {
-		out = append(out, adv...)
-	}
-
+	// OSV advisories for the GitHub Actions ecosystem are pulled by the
+	// canonical osv source via its bulk zip (added "GitHub Actions" to
+	// bulkEcosystems). The previous per-source /query call here returned 400
+	// because OSV's /query requires either a package name or commit hash, not
+	// an ecosystem alone — leaving this source emitting only the SHA-change
+	// signals below (and 0 of those when popular_actions.json is missing).
 	popular, err := c.loadPopularActions()
 	if err != nil {
 		log.Printf("[github_actions] load popular actions: %v", err)
@@ -75,130 +69,6 @@ func (c *Client) Fetch(ctx context.Context, since time.Time) ([]*incident.Incide
 	}
 
 	return out, nil
-}
-
-// queryOSVAdvisories queries the OSV API for GitHub Actions ecosystem advisories since `since`.
-func (c *Client) queryOSVAdvisories(ctx context.Context, since time.Time) ([]*incident.Incident, error) {
-	body := map[string]any{
-		"package": map[string]string{
-			"ecosystem": ecosystem,
-		},
-	}
-	if !since.IsZero() {
-		body["modified_since"] = since.UTC().Format(time.RFC3339)
-	}
-	payload, err := json.Marshal(body)
-	if err != nil {
-		return nil, err
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, osvAPIURL, bytes.NewReader(payload))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("OSV API returned %d", resp.StatusCode)
-	}
-
-	var result struct {
-		Vulns []struct {
-			ID       string   `json:"id"`
-			Summary  string   `json:"summary"`
-			Details  string   `json:"details"`
-			Refs     []struct {
-				Type string `json:"type"`
-				URL  string `json:"url"`
-			} `json:"references"`
-			Affected []struct {
-				Package struct {
-					Name      string `json:"name"`
-					Ecosystem string `json:"ecosystem"`
-				} `json:"package"`
-				Ranges []struct {
-					Type   string `json:"type"`
-					Events []struct {
-						Introduced string `json:"introduced,omitempty"`
-						Fixed       string `json:"fixed,omitempty"`
-					} `json:"events"`
-				} `json:"ranges"`
-				Versions []string `json:"versions"`
-			} `json:"affected"`
-			Severity []struct {
-				Type  string `json:"type"`
-				Score string `json:"score"`
-			} `json:"severity"`
-			Modified string `json:"modified"`
-		} `json:"vulns"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, err
-	}
-
-	var incidents []*incident.Incident
-	for _, v := range result.Vulns {
-		inc := osvVulnToIncident(v.ID, v.Summary, v.Details, v.Refs, v.Affected)
-		if inc != nil {
-			incidents = append(incidents, inc)
-		}
-	}
-	return incidents, nil
-}
-
-func osvVulnToIncident(id, summary, details string, refs []struct {
-	Type string `json:"type"`
-	URL  string `json:"url"`
-}, affected []struct {
-	Package struct {
-		Name      string `json:"name"`
-		Ecosystem string `json:"ecosystem"`
-	} `json:"package"`
-	Ranges []struct {
-		Type   string `json:"type"`
-		Events []struct {
-			Introduced string `json:"introduced,omitempty"`
-			Fixed       string `json:"fixed,omitempty"`
-		} `json:"events"`
-	} `json:"ranges"`
-	Versions []string `json:"versions"`
-}) *incident.Incident {
-	if len(affected) == 0 {
-		return nil
-	}
-	inc := &incident.Incident{
-		OSVID:       id,
-		AttackType:  "ci_poisoning",
-		Severity:    "high",
-		Description: summary,
-		Source:      "github_actions",
-	}
-	if details != "" && details != summary {
-		inc.Description = details
-	}
-	for _, r := range refs {
-		if r.URL != "" {
-			inc.References = append(inc.References, r.URL)
-		}
-	}
-	for _, a := range affected {
-		pkg := incident.Package{
-			Name:      a.Package.Name,
-			Ecosystem: "github-actions",
-		}
-		pkg.AffectedVersions = append(pkg.AffectedVersions, a.Versions...)
-		inc.Packages = append(inc.Packages, pkg)
-	}
-	if len(inc.Packages) > 0 {
-		inc.ID = "github-actions-osv-" + id
-	}
-	return inc
 }
 
 // checkActionSHAs queries GitHub API for the latest tag SHA of each popular action.

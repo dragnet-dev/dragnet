@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -55,6 +56,22 @@ func (c *Client) Fetch(ctx context.Context, since time.Time) ([]*incident.Incide
 	popular, err := c.loadPopularModels()
 	if err != nil {
 		log.Printf("[huggingface] load popular models: %v", err)
+	}
+	if len(popular) == 0 {
+		// Bootstrap: pull the current top-200 by downloads from the HF API on
+		// the fly. Without this, an empty popular set caused the source to
+		// silently skip every recent model (filter below) and emit 0
+		// incidents — a long-standing silent failure.
+		bootstrapped, bErr := c.bootstrapPopular(ctx, 200)
+		if bErr != nil {
+			log.Printf("[huggingface] bootstrap popular models: %v", bErr)
+		} else {
+			popular = bootstrapped
+			if saveErr := c.savePopularModels(popular); saveErr != nil {
+				log.Printf("[huggingface] save bootstrapped models: %v", saveErr)
+			}
+			log.Printf("[huggingface] bootstrapped popular list with %d models", len(popular))
+		}
 	}
 	popularSet := make(map[string]bool, len(popular))
 	for _, m := range popular {
@@ -207,4 +224,55 @@ func (c *Client) loadPopularModels() ([]popularModelEntry, error) {
 		return nil, err
 	}
 	return list.Models, nil
+}
+
+// bootstrapPopular fetches the top-N HF models by download count from the
+// public API. Used to seed the popular set on first run when popular_models.json
+// hasn't been written yet, removing the silent-empty-popular failure mode.
+func (c *Client) bootstrapPopular(ctx context.Context, n int) ([]popularModelEntry, error) {
+	url := fmt.Sprintf("%s/models?sort=downloads&direction=-1&limit=%d", hfAPIBase, n)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/json")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("HF API returned %d", resp.StatusCode)
+	}
+	var raw []struct {
+		ID        string `json:"id"`
+		Downloads int64  `json:"downloads"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		return nil, err
+	}
+	out := make([]popularModelEntry, 0, len(raw))
+	for _, r := range raw {
+		out = append(out, popularModelEntry{Name: r.ID, Downloads: r.Downloads})
+	}
+	return out, nil
+}
+
+// savePopularModels writes the popular list back to disk so subsequent runs
+// can skip the bootstrap fetch.
+func (c *Client) savePopularModels(models []popularModelEntry) error {
+	if c.popularPath == "" {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(c.popularPath), 0o755); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(popularModelList{
+		Generated: time.Now().UTC(),
+		Models:    models,
+	}, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(c.popularPath, data, 0o644)
 }

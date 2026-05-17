@@ -9,6 +9,7 @@ import (
 	"github.com/dragnet-dev/dragnet/internal/config"
 	"github.com/dragnet-dev/dragnet/internal/enrichment"
 	"github.com/dragnet-dev/dragnet/internal/incident"
+	"github.com/dragnet-dev/dragnet/internal/index"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 )
@@ -38,43 +39,58 @@ func runEnrich(_ *cobra.Command, _ []string) error {
 	}
 
 	allModules := map[string][]*incident.Incident{}
+	moduleOutDir := map[string]string{}
 
 	for _, modName := range config.ModuleNames {
 		modCfg, ok := cfg.Modules[modName]
 		if !ok {
 			continue
 		}
-		incidentsDir := filepath.Join(modCfg.OutputDir, "incidents")
-		incidents, err := loadAllIncidents(incidentsDir)
+		incidents, err := loadModuleIncidents(modCfg.OutputDir)
 		if err != nil {
 			log.Printf("[enrich] load %s: %v", modName, err)
 			continue
 		}
 		allModules[modName] = incidents
+		moduleOutDir[modName] = modCfg.OutputDir
 		log.Printf("[enrich] loaded %d incidents from %s", len(incidents), modName)
 	}
 
 	enr := enrichment.New(cfg.CrossEnrichment)
 	enr.Enrich(allModules)
 
-	// Write enriched incidents back in-place
+	// Persist enriched results. The bulk dataset lives in all/*.jsonl
+	// (re-written here so cross_domain_links are visible to downstream
+	// consumers); the per-incident YAMLs we still rewrite in case anyone
+	// has hand-curated drafts that need the link annotations too.
 	for modName, incidents := range allModules {
-		modCfg := cfg.Modules[modName]
-		incidentsDir := filepath.Join(modCfg.OutputDir, "incidents")
+		outDir := moduleOutDir[modName]
+		linked := 0
+		for _, inc := range incidents {
+			if len(inc.CrossDomainLinks) > 0 || len(inc.CrossDomainSources) > 0 {
+				linked++
+			}
+		}
+		if linked == 0 {
+			continue
+		}
+		log.Printf("[enrich] %s: %d incidents gained cross-domain links", modName, linked)
+
+		if err := index.WriteAllJSONLShards(incidents, outDir); err != nil {
+			log.Printf("[enrich] persist %s shards: %v", modName, err)
+		}
+
+		incidentsDir := filepath.Join(outDir, "incidents")
 		for _, inc := range incidents {
 			if len(inc.CrossDomainLinks) == 0 && len(inc.CrossDomainSources) == 0 {
 				continue
 			}
-			// Find the file and rewrite it
 			path := findIncidentFile(incidentsDir, inc.ID)
 			if path == "" {
-				log.Printf("[enrich] could not locate file for %s", inc.ID)
-				continue
+				continue // record only lives in JSONL shards — that's fine, already written
 			}
 			if err := writeIncidentYAML(path, inc); err != nil {
 				log.Printf("[enrich] write %s: %v", path, err)
-			} else {
-				log.Printf("[enrich] updated %s (%d cross-domain links)", inc.ID, len(inc.CrossDomainLinks))
 			}
 		}
 	}
@@ -82,9 +98,17 @@ func runEnrich(_ *cobra.Command, _ []string) error {
 	return nil
 }
 
-func loadAllIncidents(incidentsDir string) ([]*incident.Incident, error) {
+// loadModuleIncidents loads every incident known to the module — both per-
+// incident YAML files (legacy / hand-curated drafts that got merged) and
+// the all/*.jsonl shards (the canonical bulk dataset). Each path on its
+// own is incomplete: YAML-only would miss the 165k bulk-loaded records,
+// JSONL-only would miss handcurated drafts that haven't migrated.
+func loadModuleIncidents(outDir string) ([]*incident.Incident, error) {
 	var out []*incident.Incident
-	err := filepath.WalkDir(incidentsDir, func(path string, d os.DirEntry, err error) error {
+	seen := map[string]bool{}
+
+	incidentsDir := filepath.Join(outDir, "incidents")
+	_ = filepath.WalkDir(incidentsDir, func(path string, d os.DirEntry, err error) error {
 		if err != nil || d.IsDir() || !strings.HasSuffix(path, ".yaml") {
 			return err
 		}
@@ -96,10 +120,32 @@ func loadAllIncidents(incidentsDir string) ([]*incident.Incident, error) {
 			log.Printf("[enrich] load %s: %v (skipping)", path, err)
 			return nil
 		}
-		out = append(out, inc)
+		if !seen[inc.ID] {
+			seen[inc.ID] = true
+			out = append(out, inc)
+		}
 		return nil
 	})
-	return out, err
+
+	allDir := filepath.Join(incidentsDir, "all")
+	entries, _ := os.ReadDir(allDir)
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") {
+			continue
+		}
+		incs, err := loadIncidentsJSONL(filepath.Join(allDir, e.Name()))
+		if err != nil {
+			log.Printf("[enrich] load %s: %v (skipping)", e.Name(), err)
+			continue
+		}
+		for _, inc := range incs {
+			if !seen[inc.ID] {
+				seen[inc.ID] = true
+				out = append(out, inc)
+			}
+		}
+	}
+	return out, nil
 }
 
 func findIncidentFile(incidentsDir, id string) string {
