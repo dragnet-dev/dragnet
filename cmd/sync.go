@@ -60,7 +60,11 @@ const fetchHeartbeatInterval = 30 * time.Second
 // (suspected runtime starvation under heavy GC pressure on the prior haul
 // run), this watchdog os.Exit()s to make sure CI never burns the full 6h
 // runner budget.
-const hardWallClockBudget = 20 * time.Minute
+// 30 min covers a worst-case container module run on a fresh CI runner:
+// Trivy DB download (~1 min) + 165k incident merge/persist (~30s) +
+// sigma generation for the ~7k Tier-1/2/3 records (~17 min). Workflow
+// timeout in haul/sync.yml is 90 min — well outside this hard escape hatch.
+const hardWallClockBudget = 30 * time.Minute
 
 var syncCmd = &cobra.Command{
 	Use:   "sync",
@@ -196,14 +200,19 @@ func runSync(_ *cobra.Command, _ []string) error {
 		}
 
 		// Resolve the since timestamp for this module.
-		// Priority: explicit --since > per-module cursor > global LastSync.
+		// Priority: explicit --since > per-module cursor > zero (first-run bulk).
+		//
+		// We deliberately do NOT fall back to st.LastSync here. The previous
+		// fallback caused cross-pollution between modules when they were run
+		// back-to-back in the same workflow: sync supply would set the global
+		// cursor to now, then sync malware would inherit it and fetch nothing.
+		// Per-module cursors are per-module; a brand-new module should start
+		// with a full backfill, not silently inherit another module's cursor.
 		var since time.Time
 		if sinceOverride != nil {
 			since = *sinceOverride
 		} else if src := st.Sources[modName]; src.LastSync != nil {
 			since = *src.LastSync
-		} else {
-			since = st.LastSync
 		}
 
 		var srcs []sources.Source
@@ -490,6 +499,7 @@ func runSync(_ *cobra.Command, _ []string) error {
 
 		genStart := time.Now()
 		log.Printf("[sync][%s] generating rules + IOC feeds for %d incidents", modName, len(incidents))
+		skippedTier4 := 0
 		for i, inc := range incidents {
 			// Progress every 20k for the bulk case (264k OSV advisories).
 			if i > 0 && i%20_000 == 0 {
@@ -497,6 +507,18 @@ func runSync(_ *cobra.Command, _ []string) error {
 			}
 			if syncDryRun {
 				log.Printf("[sync][%s] dry-run: would generate rules for %s", modName, inc.ID)
+				continue
+			}
+			// Skip sigma rule generation AND IOC export for Tier 4
+			// (informational) container records. The bulk Trivy DB (~165k
+			// CVEs) lands in this tier when no popular-images snapshot is
+			// configured; doing per-incident sigma + IOC export for all of
+			// them dominates the workflow runtime (~20 min). They still land
+			// in incidents/all/*.jsonl for cross-reference — they just don't
+			// ship as actionable detection rules or get listed in the
+			// IOC feeds.
+			if inc.ContainerExt != nil && inc.ContainerExt.Tier == 4 {
+				skippedTier4++
 				continue
 			}
 			if err := gen.Generate(inc); err != nil {
@@ -511,6 +533,9 @@ func runSync(_ *cobra.Command, _ []string) error {
 					log.Printf("[sync][%s] ioc export %s: %v", modName, inc.ID, err)
 				}
 			}
+		}
+		if skippedTier4 > 0 {
+			log.Printf("[sync][%s] skipped sigma+IOC for %d Tier-4 informational records", modName, skippedTier4)
 		}
 		log.Printf("[sync][%s] generate: done in %s", modName, time.Since(genStart).Round(time.Second))
 
@@ -588,8 +613,11 @@ func runSync(_ *cobra.Command, _ []string) error {
 		}
 	}
 
-	// Update global LastSync as a fallback for new modules added in future.
-	st.LastSync = time.Now().UTC()
+	// Note: we don't touch st.LastSync here. It exists for backwards
+	// compatibility with state files written by older versions, but new
+	// state writes only update the per-module cursor in st.Sources (see
+	// the per-module save above). Cross-module fallback caused supply →
+	// malware silent-zero on first runs.
 	return stateMgr.Save(filepath.Join(dataDir(), "state/last_sync.json"), st)
 }
 
