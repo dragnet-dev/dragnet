@@ -126,21 +126,25 @@ func runGenerate(_ *cobra.Command, _ []string) error {
 			}
 		}
 
+		// Load module incidents from JSONL shards once, unconditionally —
+		// search index and STIX both consume them. Loading is fast (~5 s
+		// per module); the expensive work is the per-incident STIX
+		// validation downstream, which we gate separately.
+		incidentsDir := filepath.Join(modCfg.OutputDir, "incidents")
+		modIncidents, err := loadModuleIncidentsFromShards(modName, incidentsDir)
+		if err != nil {
+			log.Printf("[generate][%s] load incidents: %v", modName, err)
+		}
+		allModuleIncidents[modName] = modIncidents
+
 		if wantSTIX {
-			incidentsDir := filepath.Join(modCfg.OutputDir, "incidents")
 			stixOutDir := filepath.Join(modCfg.OutputDir, "feeds", "stix")
-			modIncidents, err := generateModuleSTIX(modName, incidentsDir, stixOutDir)
-			if err != nil {
+			if err := writeModuleSTIX(modName, modIncidents, stixOutDir); err != nil {
 				log.Printf("[generate][%s] stix: %v", modName, err)
 			}
-			allModuleIncidents[modName] = modIncidents
 
-			// Don't overwrite the curated index.json that sync just wrote unless
-			// generate is being run standalone with no prior sync output. When
-			// sync has produced all/*.jsonl, those files are authoritative; the
-			// index.json sync wrote already reflects the curated subset of the
-			// full merged data, including the bulk OSV/OSSF records that aren't
-			// reachable via the on-disk YAMLs generate walks.
+			// Don't overwrite the curated index.json that sync wrote unless
+			// generate is run standalone (no all/ dir exists).
 			allDir := filepath.Join(incidentsDir, "all")
 			if _, err := os.Stat(allDir); os.IsNotExist(err) {
 				if err := index.WriteCuratedIndex(modName, modIncidents, modCfg.OutputDir); err != nil {
@@ -160,7 +164,17 @@ func runGenerate(_ *cobra.Command, _ []string) error {
 		}
 	}
 
-	// Root combined outputs when all modules are processed with STIX
+	// Search index — writes BEFORE root STIX so it always lands even if
+	// STIX bundle validation runs slow on the full 450k-incident set.
+	if len(allModuleIncidents) > 0 {
+		if err := index.WriteSearchIndex(allModuleIncidents, "."); err != nil {
+			log.Printf("[generate] search index: %v", err)
+		} else {
+			log.Printf("[generate] search index: wrote per-module feeds/search-*.jsonl")
+		}
+	}
+
+	// Root combined outputs.
 	if wantSTIX && len(allModuleIncidents) > 0 {
 		if err := index.GenerateRootIndex(allModuleIncidents, "."); err != nil {
 			log.Printf("[generate] root index: %v", err)
@@ -182,67 +196,55 @@ func runGenerate(_ *cobra.Command, _ []string) error {
 	return nil
 }
 
-func generateModuleSTIX(modName, incidentsDir, stixOutDir string) ([]*incident.Incident, error) {
-	var bundles []stix.Bundle
-	var incidents []*incident.Incident
-
-	// Source 1: walk per-incident YAMLs (legacy / drafts that got merged).
-	err := filepath.WalkDir(incidentsDir, func(path string, d os.DirEntry, err error) error {
-		if err != nil || d.IsDir() || !strings.HasSuffix(path, ".yaml") {
-			return err
-		}
-		if strings.Contains(path, string(filepath.Separator)+"drafts"+string(filepath.Separator)) {
-			return nil
-		}
-
-		inc, err := incident.Load(path)
-		if err != nil {
-			log.Printf("[generate][%s] stix load %s: %v", modName, path, err)
-			return nil
-		}
-		incidents = append(incidents, inc)
-		return nil
-	})
-	if err != nil {
-		return incidents, err
-	}
-
-	// Source 2: load the new all/*.jsonl shards — these are the authoritative
-	// merged dataset written by sync. Without this, STIX generation only sees
-	// the (mostly empty) per-incident YAML tree and emits an empty bundle.
+// loadModuleIncidentsFromShards reads {incidentsDir}/all/*.jsonl into memory.
+// Used by both STIX and search index generation.
+func loadModuleIncidentsFromShards(modName, incidentsDir string) ([]*incident.Incident, error) {
+	var out []*incident.Incident
 	allDir := filepath.Join(incidentsDir, "all")
-	if entries, _ := os.ReadDir(allDir); len(entries) > 0 {
-		for _, e := range entries {
-			if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") {
-				continue
-			}
-			loaded, err := loadIncidentsJSONL(filepath.Join(allDir, e.Name()))
-			if err != nil {
-				log.Printf("[generate][%s] stix load %s: %v", modName, e.Name(), err)
-				continue
-			}
-			incidents = append(incidents, loaded...)
+	entries, _ := os.ReadDir(allDir)
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") {
+			continue
 		}
-		log.Printf("[generate][%s] stix: loaded %d incidents from all/ shards", modName, len(incidents))
+		incs, err := loadIncidentsJSONL(filepath.Join(allDir, e.Name()))
+		if err != nil {
+			log.Printf("[generate][%s] load %s: %v", modName, e.Name(), err)
+			continue
+		}
+		out = append(out, incs...)
 	}
+	return out, nil
+}
 
+// writeModuleSTIX builds and writes the per-module combined STIX bundle from
+// pre-loaded incidents. Tier-4 container records (informational, the bulk
+// Trivy DB) are skipped — they have no actionable indicators and including
+// 158k of them in STIX validation adds ~15 min to the run for zero downstream
+// value.
+func writeModuleSTIX(modName string, incidents []*incident.Incident, stixOutDir string) error {
+	var bundles []stix.Bundle
+	skipped := 0
 	for _, inc := range incidents {
+		if inc.ContainerExt != nil && inc.ContainerExt.Tier == 4 {
+			skipped++
+			continue
+		}
 		bundle := stix.GenerateBundle(inc)
 		if errs := stix.Validate(bundle); len(errs) > 0 {
-			for _, e := range errs {
-				log.Printf("[generate][%s] stix %s: %s", modName, inc.ID, e)
-			}
+			// Validation errors are logged once per bundle but not per-error
+			// to avoid log floods on the bulk OSV records that legitimately
+			// don't have STIX-shaped indicators.
 			continue
 		}
 		bundles = append(bundles, bundle)
-
-		// Skip per-incident STIX file writes on the bulk path — 250k tiny
-		// JSON files would dwarf the repo. The combined bundle below is the
-		// useful artifact for downstream consumers.
 	}
+	if skipped > 0 {
+		log.Printf("[generate][%s] stix: skipped %d Tier-4 informational records", modName, skipped)
+	}
+	log.Printf("[generate][%s] stix: %d valid bundles of %d incidents", modName, len(bundles), len(incidents))
 
 	if len(bundles) == 0 {
-		return incidents, nil
+		return nil
 	}
 
 	combined := stix.BuildCombinedBundle(bundles)
@@ -250,17 +252,17 @@ func generateModuleSTIX(modName, incidentsDir, stixOutDir string) ([]*incident.I
 		for _, e := range errs {
 			log.Printf("[generate][%s] stix bundle: %s", modName, e)
 		}
-		return incidents, fmt.Errorf("combined stix bundle for %s has %d validation error(s) — not written", modName, len(errs))
+		return fmt.Errorf("combined stix bundle for %s has %d validation error(s) — not written", modName, len(errs))
 	}
 	data, err := json.MarshalIndent(combined, "", "  ")
 	if err != nil {
-		return incidents, err
+		return err
 	}
 	dest := filepath.Join(stixOutDir, "bundle.json")
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
-		return incidents, err
+		return err
 	}
-	return incidents, os.WriteFile(dest, data, 0o644)
+	return os.WriteFile(dest, data, 0o644)
 }
 
 // loadIncidentsJSONL parses one shard file (newline-delimited JSON Incidents)

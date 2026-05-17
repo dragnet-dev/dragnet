@@ -39,4 +39,5 @@ func init() {
 	rootCmd.AddCommand(validateCmd)
 	rootCmd.AddCommand(enrichCmd)
 	rootCmd.AddCommand(updatePopularCmd)
+	rootCmd.AddCommand(manifestCmd)
 }

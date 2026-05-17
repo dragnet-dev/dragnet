@@ -698,7 +698,11 @@ func loadActorStore(ctx context.Context, lastETag string) (*actor.Store, string)
 	return actor.Load(profiles), newETag
 }
 
-// writeDraftIncidents marshals draft incidents to YAML files in draftsDir.
+// writeDraftIncidents marshals draft incidents to YAML files at
+// {draftsDir}/{year}/{id}.yaml. Year-tier sub-directories keep the per-year
+// listing bounded (drafts accumulate unboundedly over time as blog feeds
+// pump out post-incident write-ups) and let consumers `git sparse-checkout`
+// a single year if they want.
 func writeDraftIncidents(draftsDir string, drafts []*incident.Incident, dryRun bool, modName string) error {
 	if dryRun {
 		for _, d := range drafts {
@@ -706,11 +710,14 @@ func writeDraftIncidents(draftsDir string, drafts []*incident.Incident, dryRun b
 		}
 		return nil
 	}
-	if err := os.MkdirAll(draftsDir, 0o755); err != nil {
-		return err
-	}
 	for _, d := range drafts {
-		path := filepath.Join(draftsDir, d.ID+".yaml")
+		year := draftYear(d)
+		yearDir := filepath.Join(draftsDir, year)
+		if err := os.MkdirAll(yearDir, 0o755); err != nil {
+			log.Printf("[sync][%s] mkdir %s: %v", modName, yearDir, err)
+			continue
+		}
+		path := filepath.Join(yearDir, d.ID+".yaml")
 		if _, err := os.Stat(path); err == nil {
 			continue // already exists — don't overwrite a previously triaged draft
 		}
@@ -724,6 +731,18 @@ func writeDraftIncidents(draftsDir string, drafts []*incident.Incident, dryRun b
 		}
 	}
 	return nil
+}
+
+// draftYear returns the four-digit year derived from the draft incident's
+// compromise window start, or "unknown" if the field is empty / malformed.
+func draftYear(d *incident.Incident) string {
+	if d.CompromiseWindow.Start == "" {
+		return "unknown"
+	}
+	if t, err := time.Parse(time.RFC3339, d.CompromiseWindow.Start); err == nil {
+		return t.UTC().Format("2006")
+	}
+	return "unknown"
 }
 
 // enrichSupplyIncidents runs typosquat detection and impact scoring on supply chain incidents.

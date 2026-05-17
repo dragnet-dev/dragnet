@@ -315,11 +315,38 @@ func ExportCombined(modules map[string]string, destDir string) error {
 		return fmt.Errorf("combined sha256.txt: %w", err)
 	}
 
+	// Deterministic order before write — map iteration is random otherwise.
+	sort.Slice(allEntries, func(i, j int) bool {
+		if allEntries[i].Type != allEntries[j].Type {
+			return allEntries[i].Type < allEntries[j].Type
+		}
+		return allEntries[i].Value < allEntries[j].Value
+	})
+
 	data, err := json.MarshalIndent(allEntries, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(destDir, "unified.json"), data, 0o644)
+	if err := os.WriteFile(filepath.Join(destDir, "unified.json"), data, 0o644); err != nil {
+		return err
+	}
+	// JSONL companion — same data, one entry per line, for stream/grep.
+	return writeCombinedJSONL(filepath.Join(destDir, "unified.jsonl"), allEntries)
+}
+
+func writeCombinedJSONL(path string, entries []CombinedEntry) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	enc := json.NewEncoder(f)
+	for i := range entries {
+		if err := enc.Encode(entries[i]); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func uniqueStrings(slice []string, s string) []string {
@@ -382,5 +409,38 @@ func appendUnified(path string, inc *incident.Incident) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0o644)
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		return err
+	}
+	// Also write a stream/grep-friendly JSONL alongside unified.json so
+	// consumers don't have to parse a multi-MB JSON array to scan the feed.
+	return writeUnifiedJSONL(strings.TrimSuffix(path, ".json")+".jsonl", entries)
+}
+
+// writeUnifiedJSONL serialises one UnifiedEntry per line, sorted for
+// determinism. Order: type, then value, then incident_id.
+func writeUnifiedJSONL(path string, entries []UnifiedEntry) error {
+	sorted := make([]UnifiedEntry, len(entries))
+	copy(sorted, entries)
+	sort.Slice(sorted, func(i, j int) bool {
+		if sorted[i].Type != sorted[j].Type {
+			return sorted[i].Type < sorted[j].Type
+		}
+		if sorted[i].Value != sorted[j].Value {
+			return sorted[i].Value < sorted[j].Value
+		}
+		return sorted[i].IncidentID < sorted[j].IncidentID
+	})
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	enc := json.NewEncoder(f)
+	for i := range sorted {
+		if err := enc.Encode(sorted[i]); err != nil {
+			return err
+		}
+	}
+	return nil
 }
