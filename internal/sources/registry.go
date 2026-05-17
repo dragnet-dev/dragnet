@@ -41,9 +41,8 @@ import (
 	"github.com/dragnet-dev/dragnet/internal/sources/blogs/watchtowr"
 	"github.com/dragnet-dev/dragnet/internal/sources/blogs/wiz"
 	"github.com/dragnet-dev/dragnet/internal/sources/cisa"
-	"github.com/dragnet-dev/dragnet/internal/sources/deps_dev"
 	"github.com/dragnet-dev/dragnet/internal/sources/ghsa"
-	"github.com/dragnet-dev/dragnet/internal/sources/msrc"
+	"github.com/dragnet-dev/dragnet/internal/sources/malware_bazaar"
 	"github.com/dragnet-dev/dragnet/internal/sources/nvd"
 	"github.com/dragnet-dev/dragnet/internal/sources/ossf"
 	"github.com/dragnet-dev/dragnet/internal/sources/osv"
@@ -59,7 +58,7 @@ import (
 	"github.com/dragnet-dev/dragnet/internal/sources/registries/pypi"
 	"github.com/dragnet-dev/dragnet/internal/sources/registries/rubygems"
 	"github.com/dragnet-dev/dragnet/internal/sources/snyk"
-	"github.com/dragnet-dev/dragnet/internal/sources/vulncheck"
+	"github.com/dragnet-dev/dragnet/internal/sources/urlhaus"
 )
 
 // All returns one instance of every registered intelligence source.
@@ -90,9 +89,13 @@ func All() []Source {
 		blogs.NewClient(phylum.New()),
 		// ── Supply: API Intel ──────────────────────────────────────────────
 		snyk.New(),
-		deps_dev.New(),
+		// deps_dev removed — its v3alpha/advisories endpoint was retired
+		// (404). OSV bulk covers the same advisory set.
 		github_actions.New(filepath.Join("state", "popular_actions.json")),
 		huggingface.New(filepath.Join("state", "popular_models.json")),
+		// ── Malware: Bulk Sources ──────────────────────────────────────────
+		malware_bazaar.New(),
+		urlhaus.New(),
 		// ── Malware: Blog Intel ────────────────────────────────────────────
 		blogs.NewClient(polyswarm.New()),
 		blogs.NewClient(dfir_report.New()),
@@ -115,7 +118,11 @@ func All() []Source {
 		blogs.NewClient(corvus.New()),
 		// ── CVE: Sources ───────────────────────────────────────────────────
 		nvd.New(),
-		msrc.New(),
+		// msrc removed — its /updates/{monthKey} endpoint returned 404 for
+		// recent months and Microsoft CVEs are already in NVD's feed. The
+		// /Updates?$filter date-range endpoint paginates per-month CVRF
+		// documents which would be a separate large source rewrite for
+		// data already covered.
 		blogs.NewClient(project_zero.New()),
 		blogs.NewClient(rapid7.New()),
 		attackerkb.New(),
@@ -123,7 +130,8 @@ func All() []Source {
 		blogs.NewClient(horizon3.New()),
 		blogs.NewClient(watchtowr.New()),
 		blogs.NewClient(tenable.New()),
-		vulncheck.New(),
+		// vulncheck removed — paid-only service. CISA KEV + NVD bulk cover
+		// the actively-exploited / high-CVSS subset that vulncheck added.
 		// ── Container: Sources ────────────────────────────────────────────
 		// trivy_db uses "state/trivy_cache" as the default cache directory.
 		// Popular image filtering is applied post-fetch in cmd/sync.go.
