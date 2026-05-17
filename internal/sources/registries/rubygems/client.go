@@ -25,8 +25,18 @@ func (c *Client) Name() string          { return "rubygems" }
 func (c *Client) LastTimestamp() string { return c.lastTimestamp }
 
 func (c *Client) Fetch(ctx context.Context, since time.Time) ([]*incident.Incident, error) {
+	// RubyGems' timeframe_versions endpoint caps the window at 7 days. Clamp
+	// `from` to (now - 7d) so first-run / long-gap syncs don't 400 with
+	// "the supplied query time range cannot exceed 7 days". OSV bulk already
+	// covers historical RubyGems advisories — this source's value is the
+	// real-time "new gem with executables" signal in the most recent week.
+	now := time.Now().UTC()
+	earliest := now.Add(-7 * 24 * time.Hour)
+	if since.IsZero() || since.Before(earliest) {
+		since = earliest
+	}
 	from := since.Format(time.RFC3339)
-	to := time.Now().UTC().Format(time.RFC3339)
+	to := now.Format(time.RFC3339)
 	url := fmt.Sprintf("https://rubygems.org/api/v1/timeframe_versions.json?from=%s&to=%s", from, to)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {

@@ -74,6 +74,13 @@ func MergeAll(incidents []*Incident) []*Incident {
 		if inc.Campaign.Name != "" {
 			addKey(i, "campaign:"+strings.ToLower(inc.Campaign.Name))
 		}
+		// Cross-source CVE merging: CISA (KEV) and NVD (full CVE) produce
+		// distinct incidents for the same CVE; merging by CVE_ID unifies them
+		// so the merged record carries both exploited-in-wild flag (CISA) and
+		// CVSS score (NVD).
+		if inc.CVEExt != nil && inc.CVEExt.CVEID != "" {
+			addKey(i, "cve:"+strings.ToLower(inc.CVEExt.CVEID))
+		}
 		for _, ioc := range collectIOCs(inc) {
 			addKey(i, "ioc:"+strings.ToLower(ioc))
 		}
