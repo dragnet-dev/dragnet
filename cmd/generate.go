@@ -103,22 +103,34 @@ func runGenerate(_ *cobra.Command, _ []string) error {
 		// sigma YAMLs live there too (written by sync). Read from the same
 		// root we'll write the compiled-backend outputs to so the relative
 		// path math in moduleRuleOutputPath stays consistent.
+		//
+		// v0.1.12 fix: the sigma generator writes to {layer}/{year}/*.yaml
+		// (two levels deep). The previous os.ReadDir only saw the year
+		// directories as entries and skipped them — meaning compiled
+		// backends (Splunk, KQL, Elastic, etc.) silently went unwritten
+		// for any sync that landed in a year subdir. Walk recursively.
 		rulesDir := moduleRulesDir(genRulesRoot, modCfg.OutputDir)
 		sigmaRoot := filepath.Join(rulesDir, "sigma")
 		var sigmaFiles []string
 		for layer := range layers {
-			dir := filepath.Join(sigmaRoot, layer)
-			entries, err := os.ReadDir(dir)
-			if err != nil {
-				if os.IsNotExist(err) {
-					continue
-				}
-				return err
+			layerRoot := filepath.Join(sigmaRoot, layer)
+			if _, err := os.Stat(layerRoot); os.IsNotExist(err) {
+				continue
 			}
-			for _, e := range entries {
-				if !e.IsDir() && strings.HasSuffix(e.Name(), ".yaml") {
-					sigmaFiles = append(sigmaFiles, filepath.Join(dir, e.Name()))
+			err := filepath.WalkDir(layerRoot, func(path string, d os.DirEntry, err error) error {
+				if err != nil {
+					return err
 				}
+				if d.IsDir() {
+					return nil
+				}
+				if strings.HasSuffix(d.Name(), ".yaml") {
+					sigmaFiles = append(sigmaFiles, path)
+				}
+				return nil
+			})
+			if err != nil {
+				return err
 			}
 		}
 
