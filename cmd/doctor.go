@@ -160,12 +160,16 @@ func checkRulesRepo(rulesRoot string, known map[string]bool) int {
 			return nil
 		}
 		// Look for the "Incident: <id>" line. Stable convention since v0.1.8.
+		// Some templates append annotations after the ID on the same line,
+		// e.g. "Incident: dragnet-container-2024-0001 (Tier 2, CVSS 9.8)".
+		// Stop at the first whitespace OR newline after the ID so the
+		// extracted token is exactly the canonical incident ID.
 		idx := strings.Index(string(data), "Incident: ")
 		if idx < 0 {
 			return nil // no incident tag, can't dangle
 		}
 		rest := string(data)[idx+len("Incident: "):]
-		end := strings.IndexAny(rest, "\n\r")
+		end := strings.IndexAny(rest, " \t\n\r")
 		if end < 0 {
 			end = len(rest)
 		}
