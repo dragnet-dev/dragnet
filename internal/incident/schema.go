@@ -21,6 +21,11 @@ const (
 // Incident is the canonical dragnet incident record, mapped 1:1 to the YAML schema.
 type Incident struct {
 	ID               string           `yaml:"id" json:"id"`
+	// LegacyID preserves the original source-prefixed ID (urlhaus-12345,
+	// cisa-cveYYYYNNNN, ossf-...) when the canonical dragnet-{module}-YYYY-NNNN
+	// ID is assigned at ingest. Kept for traceability + lookups that still
+	// reference the old IDs. Omitted when ID was never rewritten.
+	LegacyID         string           `yaml:"legacy_id,omitempty" json:"legacy_id,omitempty"`
 	Source           string           `yaml:"source,omitempty" json:"source,omitempty"`
 	OSVID            string           `yaml:"osv_id,omitempty" json:"osv_id,omitempty"`
 	GHSAID           string           `yaml:"ghsa_id,omitempty" json:"ghsa_id,omitempty"`

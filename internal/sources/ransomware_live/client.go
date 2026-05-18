@@ -196,6 +196,16 @@ func victimsToIncidents(victims []victim, since time.Time) []*incident.Incident 
 		}
 		if v.URL != "" {
 			inc.References = []string{v.URL}
+			// Also surface the leak-site URL as a URL indicator so it flows
+			// into feeds/unified.{json,jsonl} and SOAR pipelines that watch
+			// for ransomware infrastructure. Without this the ransomware
+			// module produced 0 IOCs despite every victim record carrying
+			// an actionable URL.
+			inc.Indicators.URLs = append(inc.Indicators.URLs, incident.IndicatorValue{
+				Value:      v.URL,
+				Sources:    []string{"ransomware_live"},
+				Confidence: 0.9,
+			})
 		}
 		out = append(out, inc)
 	}

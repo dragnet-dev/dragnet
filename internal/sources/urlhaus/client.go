@@ -116,11 +116,23 @@ func urlToIncident(id, urlStr, threat, tags string, t time.Time) *incident.Incid
 	}
 
 	tagList := splitTags(tags)
+	// Promote the threat label (and first tag, if any) into Campaign so the
+	// actor attributor can match by alias. urlhaus' `threat` field is the
+	// canonical malware family ("RedLine", "AsyncRAT", "Emotet") — many of
+	// these are aliases of tracked actors in the ATT&CK store. Pre-v0.1.10
+	// this signal was dropped on the floor and 99.9% of urlhaus records had
+	// no actor attribution.
+	camp := incident.Campaign{}
+	if threat != "" && threat != "unknown" {
+		camp.Name = threat
+		camp.Actor = threat
+	}
 	return &incident.Incident{
 		ID:               "urlhaus-" + id,
 		Source:           "urlhaus",
 		AttackType:       "malware",
 		Severity:         "high",
+		Campaign:         camp,
 		Description:      fmt.Sprintf("Active malicious URL distributing %s (tags: %s)", threat, tags),
 		References:       []string{"https://urlhaus.abuse.ch/url/" + id + "/"},
 		CompromiseWindow: cw,

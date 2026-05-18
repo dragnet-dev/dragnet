@@ -40,4 +40,7 @@ func init() {
 	rootCmd.AddCommand(enrichCmd)
 	rootCmd.AddCommand(updatePopularCmd)
 	rootCmd.AddCommand(manifestCmd)
+	rootCmd.AddCommand(doctorCmd)
+	rootCmd.AddCommand(migrateIDsCmd)
+	rootCmd.AddCommand(pruneDraftsCmd)
 }

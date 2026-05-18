@@ -41,9 +41,14 @@ type FileEntry struct {
 
 // Manifest is the top-level on-disk structure written to feeds/manifest.json.
 type Manifest struct {
+	SchemaVersion  string      `json:"$schema_version"`
 	DragnetVersion string      `json:"dragnet_version"`
 	Files          []FileEntry `json:"files"`
 }
+
+// SchemaVersion stamps the manifest so downstream cache-invalidation tools
+// know which fields to expect. Mirrors index.SchemaVersion intent.
+const SchemaVersion = "1.0"
 
 var trackedExts = map[string]bool{
 	".jsonl": true,
@@ -130,7 +135,7 @@ func Build(rootDir, version string) (*Manifest, error) {
 		return nil, err
 	}
 	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
-	return &Manifest{DragnetVersion: version, Files: files}, nil
+	return &Manifest{SchemaVersion: SchemaVersion, DragnetVersion: version, Files: files}, nil
 }
 
 func buildEntry(absPath, relPath, ext string) (FileEntry, error) {

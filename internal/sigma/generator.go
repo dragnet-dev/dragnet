@@ -448,9 +448,20 @@ func (g *Generator) buildBaseData(inc *incident.Incident, date string) TemplateD
 		year = firstSeen.Format("2006")
 	}
 
+	// Post-v0.1.10: inc.ID is already canonical (assigned at ingest time via
+	// the same registry, see cmd/sync.go assignCanonicalIDs). For backward
+	// compatibility with incidents that pre-date the unification (loaded from
+	// older shards without LegacyID set), still call AssignID — which is
+	// idempotent for already-canonical IDs only if the registry knows them;
+	// otherwise use LegacyID as the lookup key so the registry returns the
+	// same canonical ID it minted at ingest.
 	dragnetID := inc.ID
-	if g.Registry != nil {
-		dragnetID = g.Registry.AssignID(g.Module, inc.ID, firstSeen)
+	if g.Registry != nil && !strings.HasPrefix(inc.ID, "dragnet-") {
+		lookupKey := inc.ID
+		if inc.LegacyID != "" {
+			lookupKey = inc.LegacyID
+		}
+		dragnetID = g.Registry.AssignID(g.Module, lookupKey, firstSeen)
 	}
 
 	d := TemplateData{

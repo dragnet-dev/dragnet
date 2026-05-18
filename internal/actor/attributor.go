@@ -7,10 +7,14 @@ import (
 )
 
 const (
-	minAliasLen       = 6   // ignore aliases shorter than this to avoid false positives
+	minAliasLen        = 6 // ignore aliases shorter than this to avoid false positives
 	explicitConfidence = 0.90
 	inferredConfidence = 0.65
-	descScanLen        = 200 // chars of description to scan for actor names
+	// descScanLen previously capped description scanning at 200 chars, which
+	// missed actor mentions later in URLhaus/CISA/Sekoia writeups. The audit
+	// found 99.9% of incidents had empty actor fields because of this. v0.1.10
+	// scans the full description plus references, campaign names, and the
+	// ransomware-extension group name. No cap.
 )
 
 // Attribute scans each incident for actor name/alias matches against the store,
@@ -74,16 +78,30 @@ func findMatches(inc *incident.Incident, store *Store) map[string]string {
 		}
 	}
 
-	// Explicit: direct Campaign.Actor or Campaign.Name fields.
+	// Explicit: direct Campaign.Actor / Campaign.Name fields, and the
+	// ransomware-extension's group name (ransomware.live publishes a clean
+	// `group_name` field that's typically a known alias — LockBit, BlackBasta,
+	// etc.).
 	tryMatch(inc.Campaign.Actor, "explicit")
 	tryMatch(inc.Campaign.Name, "explicit")
-
-	// Inferred: scan title and first N chars of description.
-	scanText := inc.Description
-	if len(scanText) > descScanLen {
-		scanText = scanText[:descScanLen]
+	if inc.RansomwareExt != nil {
+		tryMatch(inc.RansomwareExt.RansomwareGroup, "explicit")
 	}
-	combined := strings.ToLower(inc.ID + " " + scanText)
+
+	// Inferred: scan ID + full description + references + campaign aliases.
+	// Pre-v0.1.10 this was id + first 200 chars of description — that missed
+	// actor mentions later in writeups (audit: 99.9% of incidents had no
+	// actor). References are included because vendor URLs sometimes encode
+	// the group name (lockbit-leaks.onion, blackbasta-blog.com, etc.).
+	var sb strings.Builder
+	sb.WriteString(inc.ID)
+	sb.WriteByte(' ')
+	sb.WriteString(inc.Description)
+	for _, ref := range inc.References {
+		sb.WriteByte(' ')
+		sb.WriteString(ref)
+	}
+	combined := strings.ToLower(sb.String())
 
 	for alias, slug := range store.aliases {
 		if len(alias) < minAliasLen {

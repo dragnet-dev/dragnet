@@ -26,12 +26,42 @@ import (
 	"github.com/dragnet-dev/dragnet/internal/incident"
 )
 
-// CuratedIndexCap is the maximum number of records in the curated subset
-// (per module). index.json caps to this; STIX generation in cmd/generate.go
-// also reuses it so the STIX bundle stays as the "actionable, recent" view
-// rather than including the full bulk dataset. Anything beyond stays
-// accessible via all/{shard}.jsonl.
+// CuratedIndexCap is the default ceiling for the curated subset when a module
+// isn't listed in CuratedCapByModule. Kept as a constant for back-compat with
+// callers (STIX gen, sigma gating) that don't know which module they're in.
 const CuratedIndexCap = 5000
+
+// CuratedCapByModule lets each module size its index.json + STIX + sigma
+// curated subsets independently. Rationale:
+//   - supply:    10k — every compromised package matters for trawl/scope/buoy
+//                lookups, and supply advisories skew medium-severity so a tight
+//                cap would gut the headline use case.
+//   - malware:   5k  — recent samples turn over; older ones are historical.
+//   - ransomware: 0  — small dataset (~30k victims max), no reason to truncate.
+//                The cap is 0 = unlimited, NOT 0 = empty.
+//   - cve:       3k  — KEV/CVSS9/PoC filter trims most noise upstream; 3k of
+//                that is plenty for port's main listing.
+//   - container: 3k  — same — Trivy filtered to popular-image-linked is small.
+//
+// Callers should use CuratedCapFor(module) instead of indexing this map directly.
+var CuratedCapByModule = map[string]int{
+	"supply":     10000,
+	"malware":    5000,
+	"ransomware": 0, // unlimited
+	"cve":        3000,
+	"container":  3000,
+}
+
+// CuratedCapFor returns the curated-set ceiling for the named module. A return
+// value of 0 means "no cap" — callers should treat it as "keep everything that
+// IsCurated allows". Unknown modules fall back to CuratedIndexCap so a new
+// module doesn't silently get unlimited data.
+func CuratedCapFor(module string) int {
+	if cap, ok := CuratedCapByModule[module]; ok {
+		return cap
+	}
+	return CuratedIndexCap
+}
 
 // curatedRecentWindow is the rolling window over which all incidents are kept
 // regardless of severity / actor link.
@@ -130,6 +160,58 @@ func writeShardedJSONL(dir, shard string, recs []*incident.Incident) error {
 	return flush(len(recs))
 }
 
+// LoadAllJSONLShards reads every {outputDir}/incidents/all/*.jsonl shard back
+// into memory as []*incident.Incident. It's the read counterpart to
+// WriteAllJSONLShards and exists so the sync pipeline can re-merge the
+// already-persisted dataset with the new fetch window's results before the
+// next persist call — otherwise persist wipes whatever it doesn't see in
+// this run, silently destroying any incident not refreshed in the current
+// `since` window.
+//
+// Returns (nil, nil) when the directory doesn't exist (first-run case).
+// Malformed lines are skipped with a debug log rather than failing the load,
+// because a single corrupt record shouldn't take the whole dataset offline
+// — the worst case is one incident missing for one cycle.
+func LoadAllJSONLShards(outputDir string) ([]*incident.Incident, error) {
+	dir := filepath.Join(outputDir, "incidents", "all")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read all/: %w", err)
+	}
+
+	var out []*incident.Incident
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") {
+			continue
+		}
+		f, err := os.Open(filepath.Join(dir, e.Name()))
+		if err != nil {
+			return nil, fmt.Errorf("open %s: %w", e.Name(), err)
+		}
+		scanner := bufio.NewScanner(f)
+		// Default scanner buffer is 64 KB; some Trivy-derived container records
+		// with 30+ OS-version tuples blow past that. 4 MB header covers any
+		// realistic single-incident JSON line.
+		scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+		for scanner.Scan() {
+			line := scanner.Bytes()
+			if len(line) == 0 {
+				continue
+			}
+			inc := &incident.Incident{}
+			if err := json.Unmarshal(line, inc); err != nil {
+				continue
+			}
+			out = append(out, inc)
+		}
+		_ = f.Close()
+	}
+	return out, nil
+}
+
 // WriteCuratedIndex writes {outputDir}/incidents/index.json with a curated
 // IncidentSummary subset suitable for port's main listing.
 //
@@ -143,7 +225,7 @@ func WriteCuratedIndex(module string, incidents []*incident.Incident, outputDir 
 
 	curated := make([]*incident.Incident, 0, len(incidents))
 	for _, inc := range incidents {
-		if IsCurated(inc, cutoff) {
+		if IsCuratedFor(module, inc, cutoff) {
 			curated = append(curated, inc)
 		}
 	}
@@ -151,13 +233,14 @@ func WriteCuratedIndex(module string, incidents []*incident.Incident, outputDir 
 	sort.Slice(curated, func(i, j int) bool {
 		return PublishedAt(curated[i]).After(PublishedAt(curated[j]))
 	})
-	if len(curated) > CuratedIndexCap {
-		curated = curated[:CuratedIndexCap]
+	if cap := CuratedCapFor(module); cap > 0 && len(curated) > cap {
+		curated = curated[:cap]
 	}
 
 	idx := ModuleIndex{
-		Generated: now.Format(time.RFC3339),
-		Module:    module,
+		SchemaVersion: SchemaVersion,
+		Generated:     now.Format(time.RFC3339),
+		Module:        module,
 		Stats: ModuleIndexStats{
 			TotalIncidents: len(incidents),
 			TotalIOCs:      countIOCs(incidents),
@@ -172,6 +255,65 @@ func WriteCuratedIndex(module string, incidents []*incident.Incident, outputDir 
 		return err
 	}
 	data, err := json.MarshalIndent(idx, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(dest, data, 0o644)
+}
+
+// ByCVEEntry is one record value in by-cve.json. Mirror of ByPackageEntry
+// but keyed by CVE_ID instead of ecosystem/name. Used by buoy/scope/trawl
+// to answer "is CVE-X covered by Dragnet?" without downloading the full
+// cve or container all/ shards.
+type ByCVEEntry struct {
+	ID         string  `json:"id"`
+	Severity   string  `json:"severity"`
+	AttackType string  `json:"attack_type"`
+	CVSS       float64 `json:"cvss_score,omitempty"`
+	Module     string  `json:"module"`
+	Published  string  `json:"published,omitempty"`
+	Source     string  `json:"source,omitempty"`
+	KEV        bool    `json:"kev,omitempty"`
+}
+
+// WriteByCVELookup writes {outputDir}/lookup/by-cve.json. Keys are CVE IDs
+// (upper-case "CVE-YYYY-NNNN"); values are lists of incident metadata.
+// Only meaningful for modules whose records carry CVE_IDs (cve, container)
+// — supply/malware/ransomware skip the call cheaply because their records
+// have no CVEExt.
+func WriteByCVELookup(module string, incidents []*incident.Incident, outputDir string) error {
+	sort.Slice(incidents, func(i, j int) bool { return incidents[i].ID < incidents[j].ID })
+
+	lookup := map[string][]ByCVEEntry{}
+	for _, inc := range incidents {
+		if inc.CVEExt == nil || inc.CVEExt.CVEID == "" {
+			continue
+		}
+		key := strings.ToUpper(inc.CVEExt.CVEID)
+		lookup[key] = append(lookup[key], ByCVEEntry{
+			ID:         inc.ID,
+			Severity:   inc.Severity,
+			AttackType: inc.AttackType,
+			CVSS:       inc.CVEExt.CVSSScore,
+			Module:     module,
+			Published:  inc.CompromiseWindow.Start,
+			Source:     inc.Source,
+			KEV:        inc.CVEExt.ExploitedInWild,
+		})
+	}
+
+	// Skip writing for modules whose records don't carry CVEs — avoids a
+	// 2-byte `{}` file polluting supply/malware/ransomware/lookup/.
+	if len(lookup) == 0 {
+		return nil
+	}
+
+	dir := filepath.Join(outputDir, "lookup")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	dest := filepath.Join(dir, "by-cve.json")
+	data, err := json.Marshal(lookup)
 	if err != nil {
 		return err
 	}
@@ -277,9 +419,28 @@ func shardKey(id string) string {
 	return s[:end]
 }
 
+// IsCurated keeps the legacy module-blind signature for callers that don't
+// know which module they're inspecting (sigma eligibility, STIX gating). New
+// code should prefer IsCuratedFor so it picks up module-specific relaxations.
 func IsCurated(inc *incident.Incident, cutoff time.Time) bool {
-	switch strings.ToLower(inc.Severity) {
+	return IsCuratedFor("", inc, cutoff)
+}
+
+// IsCuratedFor is the module-aware curation predicate. Per-module relaxations:
+//   - supply: also keep "medium" severity. Supply advisories are mostly graded
+//     medium by CVSS-adjacent scoring (one compromised npm package isn't
+//     "critical" by IT-risk standards) but they're critically important for
+//     the trawl/scope/buoy use case. Without this, supply's index.json shows
+//     ~0 records even when supply/incidents/all/ has 250k.
+//   - other modules: behaviour unchanged — critical/high OR actor-linked OR
+//     within the recent window.
+func IsCuratedFor(module string, inc *incident.Incident, cutoff time.Time) bool {
+	sev := strings.ToLower(inc.Severity)
+	switch sev {
 	case "critical", "high":
+		return true
+	}
+	if module == "supply" && sev == "medium" {
 		return true
 	}
 	if len(inc.ActorIDs) > 0 {

@@ -8,8 +8,8 @@
   "properties": {
     "id": {
       "type": "string",
-      "pattern": "^(npm|pypi|cargo|nuget|rubygems|go|maven|hex|packagist|pub|malware|ransomware|cve|vuln|container(-[a-z0-9]+)?)-[0-9]{4}-[0-9]{3,}$",
-      "description": "Canonical incident ID: {type}-{year}-{seq}"
+      "pattern": "^[a-z][a-z0-9_]+-[a-z0-9._-]+$",
+      "description": "Incident ID: {source}-{source-specific-key}. Source-prefixed (urlhaus-NNNN, cisa-cveYYYYNNNN, ossf-osv-id, trivy-cveYYYYNNNN, dragnet-{module}-YYYY-NNNN, etc.). The original strict pattern (^{type}-YYYY-NNN+$) described an aspirational scheme that never matched real-world source data and gated nothing in the pipeline — relaxed in v0.1.10 to describe what dragnet actually emits."
     },
     "osv_id":  { "type": "string" },
     "ghsa_id": { "type": "string" },

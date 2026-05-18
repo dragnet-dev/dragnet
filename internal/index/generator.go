@@ -68,13 +68,21 @@ type IOCSummary struct {
 	Confidence float64 `json:"confidence,omitempty"`
 }
 
+// SchemaVersion stamps every artifact dragnet writes so consumers can parse
+// defensively across future shape changes. Bump on breaking changes (e.g.
+// field renamed/removed); additive changes (new optional field) don't need
+// a bump. Read by buoy/scope/trawl/port/dredge as the first thing they
+// check when loading a haul artifact.
+const SchemaVersion = "1.0"
+
 // ModuleIndex is the schema for {module}/incidents/index.json.
 type ModuleIndex struct {
-	Generated string            `json:"generated"`
-	Module    string            `json:"module"`
-	Stats     ModuleIndexStats  `json:"stats"`
-	Campaigns []CampaignSummary `json:"campaigns,omitempty"`
-	Incidents []IncidentSummary `json:"incidents"`
+	SchemaVersion string            `json:"$schema_version"`
+	Generated     string            `json:"generated"`
+	Module        string            `json:"module"`
+	Stats         ModuleIndexStats  `json:"stats"`
+	Campaigns     []CampaignSummary `json:"campaigns,omitempty"`
+	Incidents     []IncidentSummary `json:"incidents"`
 }
 
 // ModuleIndexStats holds aggregate numbers for a module index.
@@ -105,6 +113,7 @@ type RecentEntry struct {
 
 // RootIndex is the schema for incidents/index.json.
 type RootIndex struct {
+	SchemaVersion        string                 `json:"$schema_version"`
 	Generated            string                 `json:"generated"`
 	Stats                map[string]ModuleStats `json:"stats"`
 	CrossDomainIncidents []CrossDomainIncident  `json:"cross_domain_incidents,omitempty"`
@@ -116,8 +125,9 @@ func GenerateModuleIndex(module string, incidents []*incident.Incident, outputDi
 	now := time.Now().UTC().Format(time.RFC3339)
 
 	idx := ModuleIndex{
-		Generated: now,
-		Module:    module,
+		SchemaVersion: SchemaVersion,
+		Generated:     now,
+		Module:        module,
 		Stats: ModuleIndexStats{
 			TotalIncidents: len(incidents),
 			TotalIOCs:      countIOCs(incidents),
@@ -156,6 +166,7 @@ func GenerateRootIndex(allModules map[string][]*incident.Incident, rootDir strin
 	stats["total"] = total
 
 	idx := RootIndex{
+		SchemaVersion:        SchemaVersion,
 		Generated:            now,
 		Stats:                stats,
 		CrossDomainIncidents: buildCrossDomainIncidents(allModules),
@@ -228,18 +239,30 @@ func buildIncidentSummaries(incidents []*incident.Incident) []IncidentSummary {
 		var ecosystem string
 		var allSources []string
 		seen := map[string]bool{}
+		addSrc := func(s string) {
+			if s != "" && !seen[s] {
+				seen[s] = true
+				allSources = append(allSources, s)
+			}
+		}
 		for _, pkg := range inc.Packages {
 			pkgNames = append(pkgNames, pkg.Name)
 			if ecosystem == "" {
 				ecosystem = pkg.Ecosystem
 			}
 		}
+		// Source attribution — collect from every place a source name can
+		// live. Pre-v0.1.10 this only read inc.Indicators.Domains[].Sources,
+		// so any record without domain IOCs (NVD/CISA/Trivy → 99% of cve +
+		// container) reported source_count: 0 in the index even though
+		// inc.Source / inc.Sources were populated.
+		addSrc(inc.Source)
+		for _, s := range inc.Sources {
+			addSrc(s)
+		}
 		for _, d := range inc.Indicators.Domains {
 			for _, s := range d.Sources {
-				if !seen[s] {
-					seen[s] = true
-					allSources = append(allSources, s)
-				}
+				addSrc(s)
 			}
 		}
 
@@ -253,6 +276,9 @@ func buildIncidentSummaries(incidents []*incident.Incident) []IncidentSummary {
 			AttackType:         inc.AttackType,
 			Campaign:           inc.Campaign.Name,
 			Actor:              inc.Campaign.Actor,
+			// Populate from compromise_window.start — without this, port's
+			// listing UI hides every timestamp because the field is empty.
+			Published:          inc.CompromiseWindow.Start,
 			IOCCount:           countIOCs([]*incident.Incident{inc}),
 			SourceCount:        len(allSources),
 			Sources:            allSources,

@@ -185,13 +185,48 @@ func (c *Client) Fetch(ctx context.Context, since time.Time) ([]*incident.Incide
 				continue
 			}
 
+			// Populate CompromiseWindow from the CVE's last-modified date so
+			// the canonical ID assigner can year-bucket properly and consumers
+			// can sort/filter by published. Without this, every Trivy record
+			// fell into the "no date" bucket and got dragnet-container-2026-N
+			// regardless of when the underlying CVE was disclosed.
+			cw := incident.CompromiseWindow{}
+			if !vuln.LastModified.IsZero() {
+				cw.Start = vuln.LastModified.UTC().Format(time.RFC3339)
+			}
+
+			// Surface repo:tag pairs as FileName indicators so this CVE shows
+			// up in feeds/unified.{json,jsonl} alongside conventional IOCs.
+			// Consumers (port search, dredge check) can then answer "is
+			// image X:Y vulnerable?" against the unified feed instead of
+			// needing the container/incidents/all/ shards. Capped per
+			// incident to avoid the (rare) Trivy record affecting 500+
+			// tags blowing up the feeds.
+			const maxImageIndicators = 50
+			var imageIndicators []string
+			for _, img := range affected {
+				for _, tag := range img.VulnerableTags {
+					imageIndicators = append(imageIndicators, img.Repository+":"+tag)
+					if len(imageIndicators) >= maxImageIndicators {
+						break
+					}
+				}
+				if len(imageIndicators) >= maxImageIndicators {
+					break
+				}
+			}
+
 			inc := &incident.Incident{
-				ID:          "trivy-" + strings.ToLower(strings.ReplaceAll(cveID, "-", "")),
-				Source:      "trivy_db",
-				AttackType:  "vulnerability",
-				Severity:    vuln.Severity,
-				Description: vuln.Description,
-				References:  vuln.References,
+				ID:               "trivy-" + strings.ToLower(strings.ReplaceAll(cveID, "-", "")),
+				Source:           "trivy_db",
+				AttackType:       "vulnerability",
+				Severity:         vuln.Severity,
+				Description:      vuln.Description,
+				References:       vuln.References,
+				CompromiseWindow: cw,
+				Indicators: incident.Indicators{
+					FileNames: imageIndicators,
+				},
 				CVEExt: &incident.CVEExtension{
 					CVEID:      cveID,
 					CVSSScore:  vuln.CVSS,

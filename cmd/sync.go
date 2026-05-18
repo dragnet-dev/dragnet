@@ -80,6 +80,7 @@ var (
 	syncSince      string
 	syncDryRun     bool
 	syncBackfill   bool
+	syncAllowShrink bool
 )
 
 func init() {
@@ -95,6 +96,9 @@ func init() {
 		"Print actions without committing changes")
 	syncCmd.Flags().BoolVar(&syncBackfill, "backfill", false,
 		"Fetch all available historical data. Sets --since 2020-01-01. Skips registry sources.")
+	syncCmd.Flags().BoolVar(&syncAllowShrink, "allow-shrink", false,
+		"Permit persist even when merged set is >50% smaller than prior on-disk count. "+
+			"Required for legitimate purges; default refuses to prevent silent data loss.")
 }
 
 // backfillSkip lists registry sources excluded during --backfill to avoid re-polling high-volume feeds.
@@ -179,6 +183,18 @@ func runSync(_ *cobra.Command, _ []string) error {
 	}()
 
 	iocExp := ioc.New()
+
+	// Load the shared Dragnet ID registry up front so we can assign canonical
+	// dragnet-{module}-{year}-{seq} IDs at ingest time, not at sigma-gen
+	// time. This unifies the previously-split ID schemes (source-prefixed
+	// ingest IDs vs registry-assigned sigma display IDs) — every incident
+	// now carries the same canonical ID end-to-end, and the source-prefixed
+	// one is preserved in LegacyID for traceability.
+	sigmaReg, regErr := sigma.LoadRegistry(filepath.Join(dataDir(), "state/sigma-id-registry.json"))
+	if regErr != nil {
+		log.Printf("[sync] sigma registry load failed (starting fresh): %v", regErr)
+		sigmaReg, _ = sigma.LoadRegistry("/dev/null")
+	}
 
 	// ATT&CK actor store — fetched once, used by all modules for attribution.
 	// Falls back to on-disk profiles when the bundle hasn't changed (ETag match).
@@ -381,11 +397,44 @@ func runSync(_ *cobra.Command, _ []string) error {
 			incidents = enrichContainerIncidents(incidents, popularImages, cfg.Modules["container"])
 		}
 
+		if modName == "cve" {
+			before := len(incidents)
+			incidents = filterCVEByQuality(incidents)
+			log.Printf("[sync][%s] CVE quality filter: %d -> %d (kept KEV / CVSS>=9 / public PoC)", modName, before, len(incidents))
+		}
+
+		// Load whatever is already on disk and fold it into the fetched set
+		// before MergeAll. Without this, each cycle's persist call wipes any
+		// incident that wasn't refreshed within the current `since` window —
+		// supply collapsed from 264k → 0 and ransomware from 30k → 3 in a
+		// single cron tick because most sources legitimately return nothing
+		// new in 6 hours. MergeAll is union-find dedupe so re-feeding the
+		// prior set is idempotent.
+		priorCount := 0
+		if priorIncidents, err := index.LoadAllJSONLShards(modCfg.OutputDir); err != nil {
+			log.Printf("[sync][%s] load prior shards: %v (proceeding without prior state)", modName, err)
+		} else if len(priorIncidents) > 0 {
+			priorCount = len(priorIncidents)
+			log.Printf("[sync][%s] loaded %d prior incidents from disk", modName, priorCount)
+			incidents = append(priorIncidents, incidents...)
+		}
+
 		// MergeAll uses union-find bucketing by every package/campaign/IOC key,
 		// so it's near-linear even on the 490k bulk-load case. No skip needed.
+		// We merge BEFORE canonicalization so that a source-prefixed record
+		// fetched this cycle and its already-canonical prior version dedup
+		// via shared CVE_ID / package keys, not by ID. After merge, the
+		// surviving record has whichever ID was first in the input slice
+		// (prior, since we appended fetched after) — we canonicalize next.
 		log.Printf("[sync][%s] MergeAll: merging %d incidents", modName, len(incidents))
 		mergeStart := time.Now()
 		incidents = incident.MergeAll(incidents)
+
+		// Assign canonical IDs via the shared registry AFTER merge so the
+		// surviving record gets canonicalized regardless of which input
+		// slice (fetched or prior) contributed its ID. Idempotent — records
+		// already in dragnet- form pass through untouched.
+		assignCanonicalIDs(incidents, modName, sigmaReg)
 		log.Printf("[sync][%s] MergeAll: done in %s (%d after merge)", modName, time.Since(mergeStart).Round(time.Second), len(incidents))
 
 		// Actor attribution — O(incidents × actors), ~5s for 490k × 174.
@@ -402,21 +451,61 @@ func runSync(_ *cobra.Command, _ []string) error {
 		// port/buoy/scope/trawl all consume these. Generate's STIX/sigma compilation
 		// reads all.jsonl when on-disk YAMLs are absent.
 		if !syncDryRun {
-			persistStart := time.Now()
-			if err := index.WriteAllJSONLShards(incidents, modCfg.OutputDir); err != nil {
-				log.Printf("[sync][%s] persist all.jsonl: %v", modName, err)
+			// Belt-and-braces against future regressions of the prior-load fix
+			// above: refuse to persist if the post-merge set lost more than
+			// half of what was on disk. Bypass with --allow-shrink for
+			// intentional purges. Only triggers when there was meaningful
+			// prior state (>1000) so first-run / small modules aren't blocked.
+			if priorCount > 1000 && len(incidents)*2 < priorCount && !syncAllowShrink {
+				log.Printf("[sync][%s] REFUSING PERSIST: merged set (%d) is <50%% of prior on-disk (%d). "+
+					"This usually means a source went silent or a since-window regressed. "+
+					"Re-run with --allow-shrink if this is intentional.",
+					modName, len(incidents), priorCount)
+			} else {
+				persistStart := time.Now()
+				if err := index.WriteAllJSONLShards(incidents, modCfg.OutputDir); err != nil {
+					log.Printf("[sync][%s] persist all.jsonl: %v", modName, err)
+				}
+				if err := index.WriteByPackageLookup(incidents, modCfg.OutputDir); err != nil {
+					log.Printf("[sync][%s] persist by-package: %v", modName, err)
+				}
+				if err := index.WriteByCVELookup(modName, incidents, modCfg.OutputDir); err != nil {
+					log.Printf("[sync][%s] persist by-cve: %v", modName, err)
+				}
+				if err := index.WriteCuratedIndex(modName, incidents, modCfg.OutputDir); err != nil {
+					log.Printf("[sync][%s] persist index.json: %v", modName, err)
+				}
+				log.Printf("[sync][%s] persist: done in %s", modName, time.Since(persistStart).Round(time.Second))
 			}
-			if err := index.WriteByPackageLookup(incidents, modCfg.OutputDir); err != nil {
-				log.Printf("[sync][%s] persist by-package: %v", modName, err)
-			}
-			if err := index.WriteCuratedIndex(modName, incidents, modCfg.OutputDir); err != nil {
-				log.Printf("[sync][%s] persist index.json: %v", modName, err)
-			}
-			log.Printf("[sync][%s] persist: done in %s", modName, time.Since(persistStart).Round(time.Second))
 		}
 
 		moduleIncidents[modName] = incidents
 		moduleFetchErrors[modName] = atomic.LoadInt32(&fetchErrCount)
+	}
+
+	// Cross-module dedup pass. Per-module MergeAll only sees its own module's
+	// incidents, so a CVE that ships in both cve (NVD-driven) and container
+	// (Trivy-driven CISA enrichment) survives as two records. v0.1.10's
+	// container CISA filter drops most of these, but anything that slips
+	// through gets caught here. Priority: supply > malware > ransomware > cve
+	// > container — supply/malware/ransomware are the most actionable surfaces
+	// for downstream consumers, and cve/container records are encyclopedic by
+	// nature so they're cheapest to drop.
+	if !syncDryRun {
+		dedupAcrossModules(moduleIncidents, []string{"supply", "malware", "ransomware", "cve", "container"})
+		// Re-persist any module that lost records — writes are idempotent
+		// (wipe-then-write) so this just refreshes the on-disk shape.
+		for _, modName := range moduleNames {
+			modCfg, ok := cfg.Modules[modName]
+			if !ok {
+				continue
+			}
+			incidents := moduleIncidents[modName]
+			_ = index.WriteAllJSONLShards(incidents, modCfg.OutputDir)
+			_ = index.WriteByPackageLookup(incidents, modCfg.OutputDir)
+			_ = index.WriteByCVELookup(modName, incidents, modCfg.OutputDir)
+			_ = index.WriteCuratedIndex(modName, incidents, modCfg.OutputDir)
+		}
 	}
 
 	// Multi-domain source routing — fetched once, routed to matching modules.
@@ -473,12 +562,7 @@ func runSync(_ *cobra.Command, _ []string) error {
 		}
 	}
 
-	// Load the shared Dragnet ID registry (assigns sequential dragnet-<module>-<year>-<NNNN> IDs).
-	sigmaReg, regErr := sigma.LoadRegistry(filepath.Join(dataDir(), "state/sigma-id-registry.json"))
-	if regErr != nil {
-		log.Printf("[sync] sigma registry load failed (starting fresh): %v", regErr)
-		sigmaReg, _ = sigma.LoadRegistry("/dev/null") // guaranteed empty
-	}
+	// sigmaReg was loaded above (now also used at ingest for canonical IDs).
 
 	// Generate rules + export IOCs per module.
 	for _, modName := range moduleNames {
@@ -1007,7 +1091,15 @@ func enrichContainerIncidents(
 	var out []*incident.Incident
 	for _, inc := range incidents {
 		if inc.ContainerExt == nil {
-			out = append(out, inc) // non-container incidents pass through
+			// Drop: CISA/AttackerKB are wired into the container module's
+			// source list as enrichers (to flag a Trivy CVE as KEV-listed or
+			// PoC-available). MergeAll already unions by CVE_ID before this
+			// point, so any CISA record that matches a Trivy entry has been
+			// folded into that Trivy record (which carries ContainerExt).
+			// The leftovers are CVEs CISA tracks that have no container
+			// linkage at all (Windows desktop CVEs, kernel bugs in non-
+			// container contexts, etc.) — they don't belong in the container
+			// module's index.
 			continue
 		}
 		// EOL incidents always pass — they don't have a CVSS score.
@@ -1025,20 +1117,136 @@ func enrichContainerIncidents(
 			cfg,
 		)
 		if tier == 0 {
-			// When no popular-images snapshot is configured we keep the
-			// record as informational (Tier 4) rather than discarding it —
-			// otherwise the entire ~165k Trivy DB drops silently before
-			// haul ever sees it. Configure a snapshot via
-			// `dragnet update-popular --module container` to enable strict
-			// Tier 1/2/3 filtering.
-			if len(popularImages) == 0 {
-				inc.ContainerExt.Tier = 4
-				out = append(out, inc)
-			}
+			// No popular-image linkage AND no KEV/PoC signal. Pre-v0.1.10 we
+			// kept these as informational Tier-4 when no popular-images
+			// snapshot was configured, which let the entire ~165k Trivy DB
+			// land in container/incidents/all/. That bloats every consumer
+			// (port listings, STIX bundle, sigma generation, manifest) for
+			// records nobody would ever build detection from. v0.1.10 drops
+			// them unconditionally; if container's output looks empty, run
+			// `dragnet update-popular --module container` to seed the
+			// popular-images snapshot so Tier 1/2/3 can fire.
 			continue
 		}
 		inc.ContainerExt.Tier = tier
 		out = append(out, inc)
+	}
+	return out
+}
+
+// assignCanonicalIDs rewrites each incident's ID to its canonical
+// dragnet-{module}-{year}-{seq} form via the sigma registry, preserving the
+// original source-prefixed ID in LegacyID. Called at ingest time so every
+// downstream artifact (shards, lookup, index, feeds, STIX, sigma rules)
+// references the same identifier. Idempotent: an incident that already has
+// a canonical ID (because it was loaded back from disk) passes through
+// unchanged.
+//
+// firstSeen drives the year bucket — compromise_window.start when available,
+// time.Now() otherwise. The registry's same-input-same-output guarantee
+// means re-running this against the same data produces the same IDs.
+func assignCanonicalIDs(incidents []*incident.Incident, module string, reg *sigma.Registry) {
+	for _, inc := range incidents {
+		if inc == nil || inc.ID == "" {
+			continue
+		}
+		if strings.HasPrefix(inc.ID, "dragnet-") {
+			continue // already canonical
+		}
+		firstSeen := time.Time{}
+		if inc.CompromiseWindow.Start != "" {
+			if t, err := time.Parse(time.RFC3339, inc.CompromiseWindow.Start); err == nil {
+				firstSeen = t
+			}
+		}
+		canonical := reg.AssignID(module, inc.ID, firstSeen)
+		// Only set LegacyID if the rewrite actually changed the ID — guards
+		// against the (impossible-here but defensive) case where canonical
+		// happens to equal the input.
+		if canonical != inc.ID {
+			inc.LegacyID = inc.ID
+			inc.ID = canonical
+		}
+	}
+}
+
+// dedupAcrossModules removes any incident that appears in more than one
+// module's slice, keeping it only in the highest-priority module per `order`.
+// Mutates the map in place. Logs the per-module drop counts so workflow
+// output captures the size of the dedup churn.
+//
+// Dedup key prefers LegacyID over ID because ingest-time canonicalization
+// assigns module-specific canonical IDs (the same source CISA record gets
+// dragnet-cve-2026-0001 in the cve module and dragnet-container-2026-0001
+// in the container module — different IDs, same source record). The
+// LegacyID is the stable source-prefixed identifier that's the same across
+// modules. Falls back to ID for incidents that were already canonical
+// before v0.1.10 (no LegacyID set).
+func dedupAcrossModules(moduleIncidents map[string][]*incident.Incident, order []string) {
+	claimed := map[string]string{} // dedupKey -> owning module
+	dropped := map[string]int{}    // module -> count
+
+	for _, mod := range order {
+		incidents, ok := moduleIncidents[mod]
+		if !ok {
+			continue
+		}
+		kept := incidents[:0]
+		for _, inc := range incidents {
+			if inc == nil {
+				kept = append(kept, inc)
+				continue
+			}
+			key := inc.LegacyID
+			if key == "" {
+				key = inc.ID
+			}
+			if key == "" {
+				kept = append(kept, inc)
+				continue
+			}
+			if owner, seen := claimed[key]; seen {
+				dropped[mod]++
+				_ = owner
+				continue
+			}
+			claimed[key] = mod
+			kept = append(kept, inc)
+		}
+		moduleIncidents[mod] = kept
+	}
+
+	for mod, n := range dropped {
+		if n > 0 {
+			log.Printf("[sync][cross-dedup] dropped %d duplicate(s) from %s (claimed by an earlier module)", n, mod)
+		}
+	}
+}
+
+// filterCVEByQuality narrows the cve module's set to records likely to inform
+// detection work, dropping the long tail of disclosed-but-never-exploited CVEs
+// that bloat consumers without informing rules. Kept:
+//   - KEV-listed (CVEExt.ExploitedInWild) — CISA's actively-exploited catalog
+//   - CVSS >= 9 — critical scoring even without observed exploitation
+//   - public PoC available (CVEExt.ExploitPublic) — proof-of-concept makes the
+//     CVE materially more dangerous
+//   - actor-linked (ActorIDs not empty) — TTPs we track
+//
+// Records without CVEExt at all pass through unchanged so non-NVD sources
+// (e.g. blogs writing about a CVE) aren't accidentally filtered out.
+func filterCVEByQuality(incidents []*incident.Incident) []*incident.Incident {
+	out := make([]*incident.Incident, 0, len(incidents))
+	for _, inc := range incidents {
+		if inc.CVEExt == nil {
+			out = append(out, inc)
+			continue
+		}
+		if inc.CVEExt.ExploitedInWild ||
+			inc.CVEExt.ExploitPublic ||
+			inc.CVEExt.CVSSScore >= 9.0 ||
+			len(inc.ActorIDs) > 0 {
+			out = append(out, inc)
+		}
 	}
 	return out
 }
