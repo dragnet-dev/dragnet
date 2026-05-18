@@ -37,15 +37,23 @@ var doctorCmd = &cobra.Command{
 }
 
 var (
-	doctorModule string
-	doctorRoot   string
+	doctorModule     string
+	doctorRoot       string
+	doctorRulesRoot  string
+	doctorSTIXRoot   string
 )
 
 func init() {
 	doctorCmd.Flags().StringVar(&doctorModule, "module", "all",
 		"Module to check: supply|malware|ransomware|cve|container|all")
 	doctorCmd.Flags().StringVar(&doctorRoot, "root", ".",
-		"Repo root to inspect (defaults to current dir — overrideable for tests)")
+		"Intel repo (haul) root to inspect")
+	doctorCmd.Flags().StringVar(&doctorRulesRoot, "check-rules", "",
+		"haul-rules checkout path. When set, doctor walks {check-rules}/{module}/rules/ "+
+			"and verifies every rule file's referenced incident ID exists in haul.")
+	doctorCmd.Flags().StringVar(&doctorSTIXRoot, "check-stix", "",
+		"haul-stix checkout path. When set, doctor walks {check-stix}/{module}/feeds/stix/ "+
+			"and verifies every bundle's referenced incident IDs exist in haul.")
 }
 
 // moduleReport captures everything we'll cross-check for one module.
@@ -101,11 +109,118 @@ func runDoctor(_ *cobra.Command, _ []string) error {
 		issues += dangling
 	}
 
+	// v0.1.11+: when --check-rules / --check-stix point at the satellite
+	// repos, walk them and verify every cross-repo reference resolves to an
+	// incident ID that haul actually has. Catches the failure mode where
+	// haul-rules has a rule for an incident that haul itself doesn't list.
+	if doctorRulesRoot != "" {
+		if missing := checkRulesRepo(doctorRulesRoot, knownIDs); missing > 0 {
+			log.Printf("[doctor][rules-ref] FAIL %d rule files reference unknown incident IDs in %s", missing, doctorRulesRoot)
+			issues += missing
+		} else {
+			log.Printf("[doctor][rules-ref] %s: every rule resolves to a haul incident", doctorRulesRoot)
+		}
+	}
+	if doctorSTIXRoot != "" {
+		if missing := checkSTIXRepo(doctorSTIXRoot, knownIDs); missing > 0 {
+			log.Printf("[doctor][stix-ref] FAIL %d STIX objects reference unknown incident IDs in %s", missing, doctorSTIXRoot)
+			issues += missing
+		} else {
+			log.Printf("[doctor][stix-ref] %s: every STIX object resolves to a haul incident", doctorSTIXRoot)
+		}
+	}
+
 	if issues > 0 {
 		return fmt.Errorf("doctor found %d inconsistency(ies)", issues)
 	}
 	log.Printf("[doctor] all modules consistent")
 	return nil
+}
+
+// checkRulesRepo walks {rulesRoot}/{module}/rules/sigma/ for YAML rule files
+// and verifies each one's "Incident: <id>" reference (embedded in the rule
+// description by the sigma generator) resolves to a haul incident ID in
+// `known`. Returns the count of dangling rule files.
+//
+// Why we check by description-grep instead of parsing YAML: it's fast,
+// resilient to template changes, and the "Incident:" tag is a stable
+// convention in dragnet's sigma templates. A rule file with no such tag is
+// counted as clean (some non-standard rules don't carry one).
+func checkRulesRepo(rulesRoot string, known map[string]bool) int {
+	missing := 0
+	_ = filepath.Walk(rulesRoot, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info == nil || info.IsDir() {
+			return nil
+		}
+		if !strings.HasSuffix(info.Name(), ".yaml") {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil
+		}
+		// Look for the "Incident: <id>" line. Stable convention since v0.1.8.
+		idx := strings.Index(string(data), "Incident: ")
+		if idx < 0 {
+			return nil // no incident tag, can't dangle
+		}
+		rest := string(data)[idx+len("Incident: "):]
+		end := strings.IndexAny(rest, "\n\r")
+		if end < 0 {
+			end = len(rest)
+		}
+		id := strings.TrimSpace(rest[:end])
+		if id != "" && !known[id] {
+			missing++
+		}
+		return nil
+	})
+	return missing
+}
+
+// checkSTIXRepo walks {stixRoot} for bundle.json (and shards), decodes each
+// bundle, and verifies every Indicator/Malware/Vulnerability SDO whose
+// external_references include a "dragnet" source-name with the dragnet
+// incident ID actually points to an incident in `known`.
+//
+// Bundle structure (from internal/stix/bundler.go): {type: "bundle",
+// objects: [{type, id, ...}, ...]}. We scan each object's
+// external_references[].external_id when source_name == "dragnet".
+func checkSTIXRepo(stixRoot string, known map[string]bool) int {
+	missing := 0
+	_ = filepath.Walk(stixRoot, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info == nil || info.IsDir() {
+			return nil
+		}
+		if !strings.HasSuffix(info.Name(), ".json") {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil
+		}
+		var bundle struct {
+			Objects []map[string]any `json:"objects"`
+		}
+		if err := json.Unmarshal(data, &bundle); err != nil {
+			return nil
+		}
+		for _, obj := range bundle.Objects {
+			refs, _ := obj["external_references"].([]any)
+			for _, r := range refs {
+				rm, _ := r.(map[string]any)
+				if rm["source_name"] != "dragnet" {
+					continue
+				}
+				id, _ := rm["external_id"].(string)
+				if id != "" && !known[id] {
+					missing++
+				}
+			}
+		}
+		return nil
+	})
+	return missing
 }
 
 // collectKnownIDs scans incidents/all/*.jsonl for a module and adds every

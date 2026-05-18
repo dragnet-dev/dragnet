@@ -81,6 +81,8 @@ var (
 	syncDryRun     bool
 	syncBackfill   bool
 	syncAllowShrink bool
+	syncRulesRoot   string
+	syncSTIXRoot    string
 )
 
 func init() {
@@ -99,6 +101,13 @@ func init() {
 	syncCmd.Flags().BoolVar(&syncAllowShrink, "allow-shrink", false,
 		"Permit persist even when merged set is >50% smaller than prior on-disk count. "+
 			"Required for legitimate purges; default refuses to prevent silent data loss.")
+	syncCmd.Flags().StringVar(&syncRulesRoot, "rules-root", "",
+		"Write per-incident sigma rules under {rules-root}/{module}/rules/... instead of inline. "+
+			"v0.1.11 distribution split flag — mirrors `generate --rules-root` for the sync's "+
+			"per-incident sigma generation path.")
+	syncCmd.Flags().StringVar(&syncSTIXRoot, "stix-root", "",
+		"Reserved for the distribution split. sync doesn't currently write STIX bundles "+
+			"(generate handles that), so this flag is accepted for symmetry but unused today.")
 }
 
 // backfillSkip lists registry sources excluded during --backfill to avoid re-polling high-volume feeds.
@@ -572,7 +581,9 @@ func runSync(_ *cobra.Command, _ []string) error {
 			continue
 		}
 
-		sigmaOutDir := filepath.Join(modCfg.OutputDir, "rules", "sigma")
+		// v0.1.11 routing: per-incident sigma rules go under --rules-root when
+		// set, otherwise inline. Feeds always stay with the intel data (haul).
+		sigmaOutDir := filepath.Join(moduleRulesDir(syncRulesRoot, modCfg.OutputDir), "sigma")
 		feedsDir := filepath.Join(modCfg.OutputDir, "feeds")
 		// Wipe stale Sigma files only on --backfill (full historical re-ingestion).
 		// Incremental syncs fetch a time-window of incidents and must not wipe
@@ -600,9 +611,19 @@ func runSync(_ *cobra.Command, _ []string) error {
 		// IOC export still runs for all non-Tier-4 incidents below — IOC
 		// feeds want comprehensive coverage of every hash / domain / IP
 		// even from old or low-severity records.
-		sigmaSet := buildSigmaEligibleSet(incidents)
-		log.Printf("[sync][%s] sigma eligibility: %d of %d incidents qualify (curated subset, capped at %d)",
-			modName, len(sigmaSet), len(incidents), index.CuratedIndexCap)
+		// Apply the per-module curated cap only when rules live inline in
+		// haul. With --rules-root pointing at haul-rules (v0.1.11 split),
+		// rules don't compete with intel for git size — generate one for
+		// every curated incident.
+		applyCap := syncRulesRoot == ""
+		sigmaSet := buildSigmaEligibleSet(modName, incidents, applyCap)
+		if applyCap {
+			log.Printf("[sync][%s] sigma eligibility: %d of %d incidents qualify (curated, capped at %d)",
+				modName, len(sigmaSet), len(incidents), index.CuratedCapFor(modName))
+		} else {
+			log.Printf("[sync][%s] sigma eligibility: %d of %d incidents qualify (curated, uncapped — split mode)",
+				modName, len(sigmaSet), len(incidents))
+		}
 
 		// Parallel sigma + IOC generation across runtime.NumCPU() workers.
 		// The sigma.Registry is mutex-protected (see internal/sigma/registry.go),
@@ -1253,26 +1274,31 @@ func filterCVEByQuality(incidents []*incident.Incident) []*incident.Incident {
 
 // fileExists reports whether a file exists at path.
 // buildSigmaEligibleSet returns the set of incident IDs that should produce
-// sigma rules — same filter + cap as the STIX bundle and the curated
-// index.json (IsCurated → sort by published desc → cap at CuratedIndexCap).
-// IOC export runs on every non-Tier-4 incident regardless; only the sigma
-// gen path is gated.
+// sigma rules. Filter: IsCuratedFor (severe / actor-linked / recent, with
+// supply keeping medium severity).
 //
-// Without this gate, CVE generates ~6 rules per incident × 24k incidents =
-// 156k rule files (628 MB). With it: ≤5000 × ~6 = ≤30k per module.
-func buildSigmaEligibleSet(incidents []*incident.Incident) map[string]bool {
+// When applyCap is true (v0.1.10 behaviour, rules co-located with intel in
+// haul), the set is sorted by published-date desc and capped at the module's
+// configured curated cap so haul's git size stays manageable.
+//
+// When applyCap is false (v0.1.11+ with --rules-root pointing at haul-rules),
+// rules live in a separate repo and don't compete for space — generate for
+// every curated incident, no cap.
+func buildSigmaEligibleSet(module string, incidents []*incident.Incident, applyCap bool) map[string]bool {
 	cutoff := time.Now().UTC().Add(-index.CuratedRecentWindow)
 	curated := make([]*incident.Incident, 0, len(incidents))
 	for _, inc := range incidents {
-		if index.IsCurated(inc, cutoff) {
+		if index.IsCuratedFor(module, inc, cutoff) {
 			curated = append(curated, inc)
 		}
 	}
-	sort.Slice(curated, func(i, j int) bool {
-		return index.PublishedAt(curated[i]).After(index.PublishedAt(curated[j]))
-	})
-	if len(curated) > index.CuratedIndexCap {
-		curated = curated[:index.CuratedIndexCap]
+	if applyCap {
+		sort.Slice(curated, func(i, j int) bool {
+			return index.PublishedAt(curated[i]).After(index.PublishedAt(curated[j]))
+		})
+		if cap := index.CuratedCapFor(module); cap > 0 && len(curated) > cap {
+			curated = curated[:cap]
+		}
 	}
 	set := make(map[string]bool, len(curated))
 	for _, inc := range curated {

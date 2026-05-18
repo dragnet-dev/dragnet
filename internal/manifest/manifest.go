@@ -33,8 +33,13 @@ import (
 
 // FileEntry describes one consumer-facing artifact.
 type FileEntry struct {
-	Path    string `json:"path"`     // forward-slash, relative to root
-	Records int    `json:"records"`  // 0 for empty .jsonl/.txt; 1 for .yaml
+	// Repo names which haul namespace this file belongs to. Empty string
+	// means "intel" (the haul repo itself) for back-compat with v0.1.10
+	// manifests. v0.1.11 adds "rules" and "stix" when the manifest is
+	// built with satellite roots.
+	Repo    string `json:"repo,omitempty"`
+	Path    string `json:"path"`    // forward-slash, relative to that repo's root
+	Records int    `json:"records"` // 0 for empty .jsonl/.txt; 1 for .yaml
 	Bytes   int64  `json:"bytes"`
 	SHA256  string `json:"sha256"`
 }
@@ -86,8 +91,50 @@ var skipRelPathSubstrings = []string{
 	"/rules/sigma/",
 }
 
-// Build walks rootDir, returns Manifest with sorted Files.
+// Build walks rootDir, returns Manifest with sorted Files. Files are tagged
+// with repo="" (intel default). For v0.1.11 multi-repo manifests, call
+// BuildWithSatellites which merges in entries from each named satellite path.
 func Build(rootDir, version string) (*Manifest, error) {
+	return BuildWithSatellites(rootDir, version, nil)
+}
+
+// Satellite names + filesystem paths for the v0.1.11 distribution split.
+// E.g. {"rules": "/tmp/haul-rules", "stix": "/tmp/haul-stix"}. The manifest
+// catalogs each so a consumer hitting haul/feeds/manifest.json gets the
+// complete cross-repo file inventory in one fetch.
+type Satellite struct {
+	Name string // "rules", "stix", etc — surfaced as FileEntry.Repo
+	Root string // absolute filesystem path to that repo checkout
+}
+
+// BuildWithSatellites is Build plus per-satellite walks. Each satellite's
+// files are tagged with FileEntry.Repo = satellite.Name so consumers can
+// resolve them to the right raw-URL prefix via index.json's `raw` map.
+func BuildWithSatellites(rootDir, version string, satellites []Satellite) (*Manifest, error) {
+	files, err := walkRepo(rootDir, "")
+	if err != nil {
+		return nil, err
+	}
+	for _, sat := range satellites {
+		if sat.Root == "" {
+			continue
+		}
+		satFiles, err := walkRepo(sat.Root, sat.Name)
+		if err != nil {
+			return nil, fmt.Errorf("manifest satellite %q: %w", sat.Name, err)
+		}
+		files = append(files, satFiles...)
+	}
+	sort.Slice(files, func(i, j int) bool {
+		if files[i].Repo != files[j].Repo {
+			return files[i].Repo < files[j].Repo
+		}
+		return files[i].Path < files[j].Path
+	})
+	return &Manifest{SchemaVersion: SchemaVersion, DragnetVersion: version, Files: files}, nil
+}
+
+func walkRepo(rootDir, repoName string) ([]FileEntry, error) {
 	var files []FileEntry
 
 	err := filepath.WalkDir(rootDir, func(path string, d os.DirEntry, err error) error {
@@ -128,14 +175,14 @@ func Build(rootDir, version string) (*Manifest, error) {
 		if err != nil {
 			return fmt.Errorf("manifest %s: %w", rel, err)
 		}
+		entry.Repo = repoName
 		files = append(files, entry)
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
-	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
-	return &Manifest{SchemaVersion: SchemaVersion, DragnetVersion: version, Files: files}, nil
+	return files, nil
 }
 
 func buildEntry(absPath, relPath, ext string) (FileEntry, error) {

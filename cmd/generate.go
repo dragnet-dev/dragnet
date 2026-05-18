@@ -34,6 +34,8 @@ var (
 	genBackends    string
 	genLayers      string
 	genCSIOCAction string
+	genRulesRoot   string
+	genSTIXRoot    string
 )
 
 func init() {
@@ -45,6 +47,12 @@ func init() {
 		"Comma-separated layers: exposure,ioc,hunting, or 'all'")
 	generateCmd.Flags().StringVar(&genCSIOCAction, "cs-ioc-action", "detect",
 		"CrowdStrike IOC action: detect or prevent")
+	generateCmd.Flags().StringVar(&genRulesRoot, "rules-root", "",
+		"Write rule files under {rules-root}/{module}/rules/... instead of inline. "+
+			"Used by the haul workflow to push rules to the haul-rules satellite repo.")
+	generateCmd.Flags().StringVar(&genSTIXRoot, "stix-root", "",
+		"Write STIX bundles under {stix-root}/feeds/stix and {stix-root}/{module}/feeds/stix. "+
+			"Used by the haul workflow to push bundles to the haul-stix satellite repo.")
 }
 
 func runGenerate(_ *cobra.Command, _ []string) error {
@@ -91,7 +99,12 @@ func runGenerate(_ *cobra.Command, _ []string) error {
 			return fmt.Errorf("unknown module %q", modName)
 		}
 
-		sigmaRoot := filepath.Join(modCfg.OutputDir, "rules", "sigma")
+		// Sigma rule source files. v0.1.11: when --rules-root is set, source
+		// sigma YAMLs live there too (written by sync). Read from the same
+		// root we'll write the compiled-backend outputs to so the relative
+		// path math in moduleRuleOutputPath stays consistent.
+		rulesDir := moduleRulesDir(genRulesRoot, modCfg.OutputDir)
+		sigmaRoot := filepath.Join(rulesDir, "sigma")
 		var sigmaFiles []string
 		for layer := range layers {
 			dir := filepath.Join(sigmaRoot, layer)
@@ -109,7 +122,21 @@ func runGenerate(_ *cobra.Command, _ []string) error {
 			}
 		}
 
-		compileBackendsParallel(modName, sigmaFiles, be, sigmaRoot, modCfg.OutputDir)
+		// Compiled-backend outputs land alongside sigma rules — under the
+		// same {rules-root or inline}/{module}/rules/{backend}/ path.
+		compiledRoot := rulesDir
+		if genRulesRoot == "" {
+			// Inline mode: the legacy compileBackendsParallel signature took
+			// moduleOutputDir and built {moduleOutputDir}/rules/{backend}/.
+			// We preserve that by passing moduleOutputDir; the routing helper
+			// produces the same result when rulesRoot is empty.
+			compiledRoot = modCfg.OutputDir
+		} else {
+			// External mode: pass the {rules-root}/{module} root so the
+			// backend output lands at {rules-root}/{module}/rules/{backend}/.
+			compiledRoot = filepath.Join(genRulesRoot, filepath.Base(modCfg.OutputDir))
+		}
+		compileBackendsParallel(modName, sigmaFiles, be, sigmaRoot, compiledRoot)
 
 		// Load module incidents from JSONL shards once, unconditionally —
 		// search index and STIX both consume them. Loading is fast (~5 s
@@ -123,7 +150,7 @@ func runGenerate(_ *cobra.Command, _ []string) error {
 		allModuleIncidents[modName] = modIncidents
 
 		if wantSTIX {
-			stixOutDir := filepath.Join(modCfg.OutputDir, "feeds", "stix")
+			stixOutDir := moduleSTIXDir(genSTIXRoot, modCfg.OutputDir)
 			if err := writeModuleSTIX(modName, modIncidents, stixOutDir); err != nil {
 				log.Printf("[generate][%s] stix: %v", modName, err)
 			}
@@ -235,22 +262,31 @@ func writeModuleSTIX(modName string, incidents []*incident.Incident, stixOutDir 
 
 	curated := make([]*incident.Incident, 0, len(incidents))
 	for _, inc := range incidents {
-		if index.IsCurated(inc, cutoff) {
+		if index.IsCuratedFor(modName, inc, cutoff) {
 			curated = append(curated, inc)
 		}
 	}
-	// Same sort + cap as WriteCuratedIndex so STIX and index.json are
-	// exact mirrors of one another.
-	sort.Slice(curated, func(i, j int) bool {
-		return index.PublishedAt(curated[i]).After(index.PublishedAt(curated[j]))
-	})
-	if len(curated) > index.CuratedIndexCap {
-		curated = curated[:index.CuratedIndexCap]
+	// Per-module cap applies when STIX bundles live inline in haul
+	// (legacy). With --stix-root pointing at haul-stix, bundles get their
+	// own repo and the cap is dropped — the full curated set lands in the
+	// satellite bundle.
+	if genSTIXRoot == "" {
+		sort.Slice(curated, func(i, j int) bool {
+			return index.PublishedAt(curated[i]).After(index.PublishedAt(curated[j]))
+		})
+		if cap := index.CuratedCapFor(modName); cap > 0 && len(curated) > cap {
+			curated = curated[:cap]
+		}
 	}
 
 	bundles := buildBundlesParallel(curated)
-	log.Printf("[generate][%s] stix: built %d bundles (curated capped at %d, of %d total)",
-		modName, len(bundles), index.CuratedIndexCap, len(incidents))
+	if genSTIXRoot == "" {
+		log.Printf("[generate][%s] stix: built %d bundles (curated, capped at %d, of %d total)",
+			modName, len(bundles), index.CuratedCapFor(modName), len(incidents))
+	} else {
+		log.Printf("[generate][%s] stix: built %d bundles (curated, uncapped — split mode, of %d total)",
+			modName, len(bundles), len(incidents))
+	}
 
 	if len(bundles) == 0 {
 		return nil
@@ -427,18 +463,21 @@ func loadIncidentsJSONL(path string) ([]*incident.Incident, error) {
 func generateRootSTIX(allModules map[string][]*incident.Incident) error {
 	cutoff := time.Now().UTC().Add(-index.CuratedRecentWindow)
 	var curated []*incident.Incident
-	for _, incidents := range allModules {
+	for modName, incidents := range allModules {
 		modCurated := make([]*incident.Incident, 0)
 		for _, inc := range incidents {
-			if index.IsCurated(inc, cutoff) {
+			if index.IsCuratedFor(modName, inc, cutoff) {
 				modCurated = append(modCurated, inc)
 			}
 		}
-		sort.Slice(modCurated, func(i, j int) bool {
-			return index.PublishedAt(modCurated[i]).After(index.PublishedAt(modCurated[j]))
-		})
-		if len(modCurated) > index.CuratedIndexCap {
-			modCurated = modCurated[:index.CuratedIndexCap]
+		// Per-module cap applies inline; dropped when bundles live in haul-stix.
+		if genSTIXRoot == "" {
+			sort.Slice(modCurated, func(i, j int) bool {
+				return index.PublishedAt(modCurated[i]).After(index.PublishedAt(modCurated[j]))
+			})
+			if cap := index.CuratedCapFor(modName); cap > 0 && len(modCurated) > cap {
+				modCurated = modCurated[:cap]
+			}
 		}
 		curated = append(curated, modCurated...)
 	}
@@ -448,7 +487,7 @@ func generateRootSTIX(allModules map[string][]*incident.Incident) error {
 		return nil
 	}
 
-	shards, err := stix.WriteCombinedBundleShards(filepath.Join("feeds", "stix"), "bundle", bundles)
+	shards, err := stix.WriteCombinedBundleShards(rootSTIXDir(genSTIXRoot), "bundle", bundles)
 	if err != nil {
 		return fmt.Errorf("write root stix shards: %w", err)
 	}
