@@ -30,12 +30,13 @@ var generateCmd = &cobra.Command{
 }
 
 var (
-	genModule      string
-	genBackends    string
-	genLayers      string
-	genCSIOCAction string
-	genRulesRoot   string
-	genSTIXRoot    string
+	genModule            string
+	genBackends          string
+	genLayers            string
+	genCSIOCAction       string
+	genRulesRoot         string
+	genSTIXRoot          string
+	genCompiledRootBase  string
 )
 
 func init() {
@@ -53,6 +54,11 @@ func init() {
 	generateCmd.Flags().StringVar(&genSTIXRoot, "stix-root", "",
 		"Write STIX bundles under {stix-root}/feeds/stix and {stix-root}/{module}/feeds/stix. "+
 			"Used by the haul workflow to push bundles to the haul-stix satellite repo.")
+	generateCmd.Flags().StringVar(&genCompiledRootBase, "compiled-root-base", "",
+		"Base path for per-backend satellite repos. Each backend writes to "+
+			"{compiled-root-base}-{backend}/{module}/rules/{backend}/. "+
+			"Pair with --rules-root pointing at the sigma source repo. "+
+			"Mutually exclusive with --rules-root acting as the compiled output root.")
 }
 
 func runGenerate(_ *cobra.Command, _ []string) error {
@@ -133,21 +139,25 @@ func runGenerate(_ *cobra.Command, _ []string) error {
 			}
 		}
 
-		// Compiled-backend outputs land alongside sigma rules — under the
-		// same {rules-root or inline}/{module}/rules/{backend}/ path.
-		compiledRoot := rulesDir
-		if genRulesRoot == "" {
-			// Inline mode: the legacy compileBackendsParallel signature took
-			// moduleOutputDir and built {moduleOutputDir}/rules/{backend}/.
-			// We preserve that by passing moduleOutputDir; the routing helper
-			// produces the same result when rulesRoot is empty.
-			compiledRoot = modCfg.OutputDir
-		} else {
-			// External mode: pass the {rules-root}/{module} root so the
-			// backend output lands at {rules-root}/{module}/rules/{backend}/.
-			compiledRoot = filepath.Join(genRulesRoot, filepath.Base(modCfg.OutputDir))
+		// Compiled-backend output root. Three modes:
+		//   per-backend: --compiled-root-base ../haul-rules → each backend
+		//                writes to ../haul-rules-{backend}/{module}/rules/
+		//   external:    --rules-root ../haul-rules (no compiled-root-base) →
+		//                all backends under ../haul-rules/{module}/rules/
+		//   inline:      no flags → {module}/rules/{backend}/ in the haul tree
+		var rootFor func(backendName string) string
+		switch {
+		case genCompiledRootBase != "":
+			rootFor = func(bname string) string {
+				return compiledRootForBackend(genCompiledRootBase, bname, modCfg.OutputDir)
+			}
+		case genRulesRoot != "":
+			root := filepath.Join(genRulesRoot, filepath.Base(modCfg.OutputDir))
+			rootFor = func(_ string) string { return root }
+		default:
+			rootFor = func(_ string) string { return modCfg.OutputDir }
 		}
-		compileBackendsParallel(modName, sigmaFiles, be, sigmaRoot, compiledRoot)
+		compileBackendsParallel(modName, sigmaFiles, be, sigmaRoot, rootFor)
 
 		// Load module incidents from JSONL shards once, unconditionally —
 		// search index and STIX both consume them. Loading is fast (~5 s
@@ -320,7 +330,10 @@ func writeModuleSTIX(modName string, incidents []*incident.Incident, stixOutDir 
 // the write entirely when the compiled bytes match what's already on disk,
 // which both shaves I/O and avoids dirtying the git index when nothing
 // substantive changed.
-func compileBackendsParallel(modName string, sigmaFiles []string, be []backends.Backend, sigmaRoot, moduleOutDir string) {
+// compileBackendsParallel compiles every (sigmaFile × backend) pair.
+// rootFor maps a backend name to the module output root for that backend —
+// either a constant (single-repo mode) or a per-backend path (split mode).
+func compileBackendsParallel(modName string, sigmaFiles []string, be []backends.Backend, sigmaRoot string, rootFor func(string) string) {
 	type job struct {
 		sf      string
 		data    []byte
@@ -360,7 +373,7 @@ func compileBackendsParallel(modName string, sigmaFiles []string, be []backends.
 					log.Printf("[generate][%s] %s compile %s: %v", modName, j.backend.Name(), j.sf, err)
 					continue
 				}
-				dest := moduleRuleOutputPath(j.backend, j.sf, sigmaRoot, moduleOutDir)
+				dest := moduleRuleOutputPath(j.backend, j.sf, sigmaRoot, rootFor(j.backend.Name()))
 				if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 					log.Printf("[generate][%s] mkdir %s: %v", modName, dest, err)
 					continue

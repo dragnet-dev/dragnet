@@ -29,6 +29,15 @@ func moduleRulesDir(rulesRoot, moduleOutputDir string) string {
 	return filepath.Join(moduleOutputDir, "rules")
 }
 
+// compiledRootForBackend returns the module output root for a single backend
+// when using the per-backend satellite split (--compiled-root-base).
+//
+// Examples (compiledRootBase = "../haul-rules", backendName = "kql", moduleOutputDir = "supply"):
+//   → "../haul-rules-kql/supply/rules"
+func compiledRootForBackend(compiledRootBase, backendName, moduleOutputDir string) string {
+	return filepath.Join(compiledRootBase+"-"+backendName, filepath.Base(moduleOutputDir), "rules")
+}
+
 // moduleSTIXDir returns where the per-module STIX bundle should be written.
 // Same shape as moduleRulesDir but for STIX output.
 //
