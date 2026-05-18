@@ -41,21 +41,21 @@ detection:
   selection_domain:
     DestinationHostname|contains:
 {{- range .Domains}}
-      - '{{.Value}}'
+      - '{{ yamlsq .Value }}'
 {{- end}}
 {{- end}}
 {{- if .IPs}}
   selection_ip:
     DestinationIp|contains:
 {{- range .IPs}}
-      - '{{.Value}}'
+      - '{{ yamlsq .Value }}'
 {{- end}}
 {{- end}}
 {{- if .URLs}}
   selection_url:
     DestinationHostname|contains:
 {{- range .URLs}}
-      - '{{.Value}}'
+      - '{{ yamlsq .Value }}'
 {{- end}}
 {{- end}}
   condition: {{networkCondition .}}

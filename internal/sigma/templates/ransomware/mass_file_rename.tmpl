@@ -24,7 +24,7 @@ detection:
   selection:
     TargetFilename|endswith:
 {{- range .RansomNoteFilenames}}
-      - '{{.}}'
+      - '{{ yamlsq . }}'
 {{- end}}
       - '.encrypted'
       - '.locked'

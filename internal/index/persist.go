@@ -26,41 +26,11 @@ import (
 	"github.com/dragnet-dev/dragnet/internal/incident"
 )
 
-// CuratedIndexCap is the default ceiling for the curated subset when a module
-// isn't listed in CuratedCapByModule. Kept as a constant for back-compat with
-// callers (STIX gen, sigma gating) that don't know which module they're in.
-const CuratedIndexCap = 5000
-
-// CuratedCapByModule lets each module size its index.json + STIX + sigma
-// curated subsets independently. Rationale:
-//   - supply:    10k — every compromised package matters for trawl/scope/buoy
-//                lookups, and supply advisories skew medium-severity so a tight
-//                cap would gut the headline use case.
-//   - malware:   5k  — recent samples turn over; older ones are historical.
-//   - ransomware: 0  — small dataset (~30k victims max), no reason to truncate.
-//                The cap is 0 = unlimited, NOT 0 = empty.
-//   - cve:       3k  — KEV/CVSS9/PoC filter trims most noise upstream; 3k of
-//                that is plenty for port's main listing.
-//   - container: 3k  — same — Trivy filtered to popular-image-linked is small.
-//
-// Callers should use CuratedCapFor(module) instead of indexing this map directly.
-var CuratedCapByModule = map[string]int{
-	"supply":     10000,
-	"malware":    5000,
-	"ransomware": 0, // unlimited
-	"cve":        3000,
-	"container":  3000,
-}
-
-// CuratedCapFor returns the curated-set ceiling for the named module. A return
-// value of 0 means "no cap" — callers should treat it as "keep everything that
-// IsCurated allows". Unknown modules fall back to CuratedIndexCap so a new
-// module doesn't silently get unlimited data.
-func CuratedCapFor(module string) int {
-	if cap, ok := CuratedCapByModule[module]; ok {
-		return cap
-	}
-	return CuratedIndexCap
+// CuratedCapFor returns 0 for all modules — no size cap. Each backend format
+// is distributed via its own satellite repo (haul-rules-sigma, haul-rules-kql,
+// etc.) so repo size is bounded per-format, not per-module ceiling.
+func CuratedCapFor(_ string) int {
+	return 0
 }
 
 // curatedRecentWindow is the rolling window over which all incidents are kept

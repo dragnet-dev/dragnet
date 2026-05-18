@@ -23,7 +23,7 @@ detection:
   selection:
     TargetFilename|endswith:
 {{- range .RansomNoteFilenames}}
-      - '{{.}}'
+      - '{{ yamlsq . }}'
 {{- end}}
   condition: selection
 falsepositives:

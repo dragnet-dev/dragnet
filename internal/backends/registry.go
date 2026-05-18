@@ -17,7 +17,19 @@ import (
 	"github.com/dragnet-dev/dragnet/internal/backends/wazuh"
 )
 
-// All returns one instance of every registered backend.
+// All returns the default backend set for `--backends all`.
+//
+// crowdstrike-ioc and datadog are intentionally excluded from the default
+// (v0.1.15+): both emit pure IOC lists (hash/domain/IP) which duplicate
+// the data already in feeds/unified.jsonl, so shipping them per-incident
+// in haul-rules was inflating the satellite repo by ~30% with no consumer
+// benefit (TIP/SOAR pipelines using CrowdStrike or Datadog can read the
+// unified feed in half the bytes). They remain registered for explicit
+// opt-in via `--backends crowdstrike-ioc,datadog,...`.
+//
+// snort + suricata stay in the default set — they're network IDS formats
+// that home/SMB users deploy through pfSense / OPNsense, which is a real
+// non-redundant audience the unified feed doesn't serve.
 func All(csIOCAction string) []Backend {
 	return []Backend{
 		kql.New(),
@@ -29,10 +41,18 @@ func All(csIOCAction string) []Backend {
 		suricata.New(),
 		snort.New(),
 		crowdstrike.NewLogScale(),
-		crowdstrike.NewIOC(csIOCAction),
 		qradar.New(),
-		datadog.New(),
 	}
+}
+
+// AllIncludingRedundant returns the full registered set, including the
+// pure-IOC backends excluded from the default. Used by ByName so that
+// operators who explicitly name a redundant backend still get it.
+func AllIncludingRedundant(csIOCAction string) []Backend {
+	return append(All(csIOCAction),
+		crowdstrike.NewIOC(csIOCAction),
+		datadog.New(),
+	)
 }
 
 // ByName returns only backends whose Name() matches one of the given names.
@@ -45,7 +65,7 @@ func ByName(names []string, csIOCAction string) ([]Backend, error) {
 	}
 	delete(nameSet, "stix") // handled at the generate layer, not a backend
 	var out []Backend
-	for _, b := range All(csIOCAction) {
+	for _, b := range AllIncludingRedundant(csIOCAction) {
 		if nameSet[b.Name()] {
 			delete(nameSet, b.Name())
 			out = append(out, b)

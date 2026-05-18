@@ -23,7 +23,7 @@ detection:
   selection:
     Image|contains:
 {{- range imageTagList .AffectedImages}}
-      - '{{.}}'
+      - '{{ yamlsq . }}'
 {{- end}}
   condition: selection
 falsepositives:

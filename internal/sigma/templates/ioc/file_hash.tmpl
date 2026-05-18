@@ -23,7 +23,7 @@ detection:
   selection:
     Hashes|contains:
 {{- range .FileHashes}}
-      - '{{upper .Algorithm}}={{.Value}}'
+      - '{{upper .Algorithm}}={{ yamlsq .Value }}'
 {{- end}}
   condition: selection
 falsepositives:

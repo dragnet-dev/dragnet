@@ -80,6 +80,16 @@ func New(outputDir, module string, registry *Registry) *Generator {
 // templateFuncs is the FuncMap available in every template.
 var templateFuncs = template.FuncMap{
 	"upper": strings.ToUpper,
+	// yamlsq escapes a string for safe embedding inside YAML single-quoted
+	// context: `'{{ yamlsq .Value }}'`. The only escape in YAML's
+	// single-quoted form is doubling the quote character — newlines and
+	// other control chars stay literal (we already flatten those at
+	// ingest, see ransomware_live.flattenWS). Without this, URLs that
+	// encode victim names like "company's_part1" prematurely close the
+	// YAML string and break every downstream backend's parser.
+	"yamlsq": func(s string) string {
+		return strings.ReplaceAll(s, "'", "''")
+	},
 	"networkCondition": func(d TemplateData) string {
 		parts := []string{}
 		if len(d.Domains) > 0 {

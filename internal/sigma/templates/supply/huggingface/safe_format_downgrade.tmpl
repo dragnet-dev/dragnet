@@ -27,7 +27,7 @@ detection:
   selection_model_ref:
     CommandLine|contains:
 {{- range .PackageNames}}
-      - '{{.}}'
+      - '{{ yamlsq . }}'
 {{- end}}
   selection_binary_ext:
     CommandLine|contains:

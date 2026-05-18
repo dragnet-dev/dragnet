@@ -23,7 +23,7 @@ detection:
   selection:
     TargetFilename|contains:
 {{- range .FilePresence}}
-      - '{{.}}'
+      - '{{ yamlsq . }}'
 {{- end}}
   condition: selection
 falsepositives:

@@ -44,7 +44,7 @@ func init() {
 	generateCmd.Flags().StringVar(&genBackends, "backends", "all",
 		"Comma-separated backends to compile, or 'all'")
 	generateCmd.Flags().StringVar(&genLayers, "layers", "all",
-		"Comma-separated layers: exposure,ioc,hunting, or 'all'")
+		"Comma-separated sigma layer subdirectory names to compile, or 'all' to compile every layer present on disk")
 	generateCmd.Flags().StringVar(&genCSIOCAction, "cs-ioc-action", "detect",
 		"CrowdStrike IOC action: detect or prevent")
 	generateCmd.Flags().StringVar(&genRulesRoot, "rules-root", "",
@@ -74,18 +74,15 @@ func runGenerate(_ *cobra.Command, _ []string) error {
 		}
 	}
 
-	validLayers := map[string]bool{"exposure": true, "ioc": true, "hunting": true}
-	layers := map[string]bool{}
-	if genLayers == "all" {
-		layers["exposure"] = true
-		layers["ioc"] = true
-		layers["hunting"] = true
-	} else {
+	// explicitLayers is non-nil only when the caller names specific layers.
+	// nil means "all layers" — we walk every subdir of sigmaRoot at runtime
+	// so new layer names (cve, malware, ransomware, container, …) are picked
+	// up automatically without updating this list.
+	var explicitLayers map[string]bool
+	if genLayers != "all" {
+		explicitLayers = map[string]bool{}
 		for _, l := range strings.Split(genLayers, ",") {
-			if !validLayers[l] {
-				return fmt.Errorf("unknown layer %q (valid: exposure, ioc, hunting)", l)
-			}
-			layers[l] = true
+			explicitLayers[l] = true
 		}
 	}
 
@@ -112,25 +109,27 @@ func runGenerate(_ *cobra.Command, _ []string) error {
 		rulesDir := moduleRulesDir(genRulesRoot, modCfg.OutputDir)
 		sigmaRoot := filepath.Join(rulesDir, "sigma")
 		var sigmaFiles []string
-		for layer := range layers {
-			layerRoot := filepath.Join(sigmaRoot, layer)
-			if _, err := os.Stat(layerRoot); os.IsNotExist(err) {
-				continue
-			}
-			err := filepath.WalkDir(layerRoot, func(path string, d os.DirEntry, err error) error {
+		if entries, err := os.ReadDir(sigmaRoot); err == nil {
+			for _, entry := range entries {
+				if !entry.IsDir() {
+					continue
+				}
+				if explicitLayers != nil && !explicitLayers[entry.Name()] {
+					continue
+				}
+				layerRoot := filepath.Join(sigmaRoot, entry.Name())
+				err := filepath.WalkDir(layerRoot, func(path string, d os.DirEntry, err error) error {
+					if err != nil {
+						return err
+					}
+					if !d.IsDir() && strings.HasSuffix(d.Name(), ".yaml") {
+						sigmaFiles = append(sigmaFiles, path)
+					}
+					return nil
+				})
 				if err != nil {
 					return err
 				}
-				if d.IsDir() {
-					return nil
-				}
-				if strings.HasSuffix(d.Name(), ".yaml") {
-					sigmaFiles = append(sigmaFiles, path)
-				}
-				return nil
-			})
-			if err != nil {
-				return err
 			}
 		}
 

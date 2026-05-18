@@ -17,6 +17,7 @@ var (
 	manifestRoot       string
 	manifestSatellites []string
 	manifestIndexOnly  bool
+	manifestCDNBase    string
 )
 
 var manifestCmd = &cobra.Command{
@@ -48,6 +49,10 @@ func init() {
 	manifestCmd.Flags().BoolVar(&manifestIndexOnly, "index-only", false,
 		"Skip the file walk; only refresh index.json. Useful when the satellite "+
 			"repos changed config but no data turned over.")
+	manifestCmd.Flags().StringVar(&manifestCDNBase, "cdn-base", "",
+		"Optional S3/CDN base URL for self-hosted mirrors (e.g. https://bucket.example.com). "+
+			"When set, index.json gains a 'cdn' map alongside 'raw' so consumer tools "+
+			"can prefer the CDN over raw.githubusercontent.com.")
 }
 
 // IndexOrchestrator is the tiny entry-point file at haul/index.json. Consumers
@@ -57,9 +62,10 @@ func init() {
 type IndexOrchestrator struct {
 	SchemaVersion string            `json:"$schema_version"`
 	Generated     string            `json:"generated"`
-	Repos         map[string]string `json:"repos"`        // name -> github.com URL
-	Raw           map[string]string `json:"raw"`          // name -> raw.githubusercontent.com prefix
-	ManifestURL   string            `json:"manifest_url"` // canonical manifest location
+	Repos         map[string]string `json:"repos"`          // name -> github.com URL
+	Raw           map[string]string `json:"raw"`            // name -> raw.githubusercontent.com prefix
+	CDN           map[string]string `json:"cdn,omitempty"`  // name -> S3/CDN base URL (optional, self-hosted)
+	ManifestURL   string            `json:"manifest_url"`   // canonical manifest location
 }
 
 func runManifest(_ *cobra.Command, _ []string) error {
@@ -84,7 +90,7 @@ func runManifest(_ *cobra.Command, _ []string) error {
 	// Always (re)write the orchestrator file. It's tiny, only changes when
 	// satellite roster changes, but writing it every run keeps the
 	// generated timestamp honest.
-	if err := writeOrchestrator(manifestRoot, sats); err != nil {
+	if err := writeOrchestrator(manifestRoot, sats, manifestCDNBase); err != nil {
 		return fmt.Errorf("write orchestrator: %w", err)
 	}
 	return nil
@@ -128,9 +134,9 @@ func countByRepo(files []manifest.FileEntry) string {
 
 // writeOrchestrator emits {rootDir}/index.json. The repo + raw URLs are
 // derived from the satellite names: every satellite is assumed to live at
-// github.com/dragnet-dev/haul-{name} on main. If you ever fork the layout
-// (different org, different branch), this is the place to change it.
-func writeOrchestrator(rootDir string, sats []manifest.Satellite) error {
+// github.com/dragnet-dev/haul-{name} on main. If cdnBase is non-empty,
+// a "cdn" map is also written so consumers can prefer the CDN endpoint.
+func writeOrchestrator(rootDir string, sats []manifest.Satellite, cdnBase string) error {
 	const org = "dragnet-dev"
 	const branch = "main"
 	repos := map[string]string{
@@ -144,11 +150,22 @@ func writeOrchestrator(rootDir string, sats []manifest.Satellite) error {
 		raw[s.Name] = fmt.Sprintf("https://raw.githubusercontent.com/%s/haul-%s/%s", org, s.Name, branch)
 	}
 
+	var cdn map[string]string
+	if cdnBase != "" {
+		cdn = map[string]string{
+			"intel": strings.TrimRight(cdnBase, "/") + "/haul",
+		}
+		for _, s := range sats {
+			cdn[s.Name] = strings.TrimRight(cdnBase, "/") + "/haul-" + s.Name
+		}
+	}
+
 	doc := IndexOrchestrator{
 		SchemaVersion: manifest.SchemaVersion,
 		Generated:     time.Now().UTC().Format(time.RFC3339),
 		Repos:         repos,
 		Raw:           raw,
+		CDN:           cdn,
 		ManifestURL:   raw["intel"] + "/feeds/manifest.json",
 	}
 	data, err := json.MarshalIndent(doc, "", "  ")

@@ -26,18 +26,18 @@ detection:
   selection_seed:
     DestinationHostname|contains:
 {{- range .SessionSeedNodes}}
-      - '{{.}}'
+      - '{{ yamlsq . }}'
 {{- end}}
 {{- end}}
 {{- if .SessionFileServer}}
   selection_fileserver:
     DestinationHostname|contains:
-      - '{{.SessionFileServer}}'
+      - '{{ yamlsq .SessionFileServer }}'
 {{- end}}
 {{- if .SessionRecipientID}}
   selection_recipient:
     CommandLine|contains:
-      - '{{.SessionRecipientID}}'
+      - '{{ yamlsq .SessionRecipientID }}'
 {{- end}}
   condition: {{sessionCondition .}}
 falsepositives:

@@ -26,21 +26,21 @@ detection:
   selection_service:
     TargetFilename|contains:
 {{- range .ServiceNames}}
-      - '{{.}}'
+      - '{{ yamlsq . }}'
 {{- end}}
 {{- end}}
 {{- if .MacOSPersistence}}
   selection_macos:
     TargetFilename|contains:
 {{- range .MacOSPersistence}}
-      - '{{.}}'
+      - '{{ yamlsq . }}'
 {{- end}}
 {{- end}}
 {{- if .LinuxPersistence}}
   selection_linux:
     TargetFilename|contains:
 {{- range .LinuxPersistence}}
-      - '{{.}}'
+      - '{{ yamlsq . }}'
 {{- end}}
 {{- end}}
   condition: {{persistenceCondition .}}
