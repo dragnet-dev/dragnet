@@ -602,7 +602,11 @@ func buildRichDescription(inc *incident.Incident) string {
 	}
 
 	if len(inc.Description) > 10 && !strings.HasPrefix(inc.Description, "Incident: ") {
-		parts = append(parts, inc.Description)
+		// Defensive: collapse any internal whitespace so embedded
+		// descriptions can't break the rule's YAML block scalar. The
+		// ingest layer (ransomware_live, etc.) is the primary defence;
+		// this catches anything that slips through.
+		parts = append(parts, strings.Join(strings.Fields(inc.Description), " "))
 	}
 
 	if inc.CompromiseWindow.Start != "" {

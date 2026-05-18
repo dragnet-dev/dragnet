@@ -213,14 +213,25 @@ func victimsToIncidents(victims []victim, since time.Time) []*incident.Incident 
 }
 
 func describeVictim(v victim) string {
-	parts := []string{fmt.Sprintf("Ransomware victim claim by %s: %s", v.Group, v.Victim)}
+	parts := []string{fmt.Sprintf("Ransomware victim claim by %s: %s", flattenWS(v.Group), flattenWS(v.Victim))}
 	if v.Country != "" {
-		parts = append(parts, "country: "+v.Country)
+		parts = append(parts, "country: "+flattenWS(v.Country))
 	}
 	if v.Activity != "" {
-		parts = append(parts, "sector: "+v.Activity)
+		parts = append(parts, "sector: "+flattenWS(v.Activity))
 	}
 	return strings.Join(parts, "; ")
+}
+
+// flattenWS collapses any internal whitespace (newlines, tabs, multiple
+// spaces) into single spaces. ransomware.live publishes some victim names
+// with embedded line breaks (multi-line addresses, multi-sentence sector
+// descriptions). When that text is later embedded in a Sigma rule's
+// description block scalar, the unindented newlines break YAML parsing
+// across every downstream backend. Normalising at ingest avoids the issue
+// once and forever.
+func flattenWS(s string) string {
+	return strings.Join(strings.Fields(s), " ")
 }
 
 func slugify(s string) string {
