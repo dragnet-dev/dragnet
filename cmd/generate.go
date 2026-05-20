@@ -170,6 +170,16 @@ func runGenerate(_ *cobra.Command, _ []string) error {
 		}
 		allModuleIncidents[modName] = modIncidents
 
+		// IOC-native backends (YARA etc.) generate from incident JSON, not Sigma.
+		// Activated when --backends all or when "yara" is explicitly named.
+		wantYARA := genBackends == "all" || slices.Contains(strings.Split(genBackends, ","), "yara")
+		if wantYARA {
+			iocNative := backends.AllIOCNative()
+			if err := compileIOCNativeBackends(modName, modIncidents, iocNative, rootFor); err != nil {
+				log.Printf("[generate][%s] ioc-native backends: %v", modName, err)
+			}
+		}
+
 		if wantSTIX {
 			stixOutDir := moduleSTIXDir(genSTIXRoot, modCfg.OutputDir)
 			if err := writeModuleSTIX(modName, modIncidents, stixOutDir); err != nil {
@@ -527,4 +537,85 @@ func moduleRuleOutputPath(b backends.Backend, sigmaFile, sigmaRoot, moduleOutput
 	ext := b.OutputExtension()
 	base := strings.TrimSuffix(rel, filepath.Ext(rel)) + ext
 	return filepath.Join(moduleOutputDir, "rules", b.Name(), base)
+}
+
+// compileIOCNativeBackends generates rules from incident data for backends that
+// implement IOCNativeBackend (e.g. YARA). Writes individual rule files and a
+// per-module bundle file. Uses writeFileIfChanged to avoid spurious git diffs.
+func compileIOCNativeBackends(
+	modName string,
+	incidents []*incident.Incident,
+	iocBackends []backends.IOCNativeBackend,
+	rootFor func(string) string,
+) error {
+	for _, b := range iocBackends {
+		root := rootFor(b.Name())
+		rulesDir := filepath.Join(root, "rules", b.Name())
+
+		// Extract module name from the first incident's ID (dragnet-{module}-…)
+		// for the per-module subdirectory. Fall back to modName.
+		moduleSlug := modName
+
+		var bundle []byte
+		written, skipped := 0, 0
+
+		for _, inc := range incidents {
+			rule, err := b.GenerateFromIncident(inc)
+			if err != nil {
+				log.Printf("[generate][%s] %s generate %s: %v", modName, b.Name(), inc.ID, err)
+				continue
+			}
+			if rule == nil {
+				skipped++
+				continue
+			}
+
+			// Derive year from compromise window start or fall back to current year.
+			year := "unknown"
+			if inc.CompromiseWindow.Start != "" && len(inc.CompromiseWindow.Start) >= 4 {
+				year = inc.CompromiseWindow.Start[:4]
+			}
+
+			outDir := filepath.Join(rulesDir, moduleSlug, year)
+			if err := os.MkdirAll(outDir, 0o755); err != nil {
+				log.Printf("[generate][%s] %s mkdir %s: %v", modName, b.Name(), outDir, err)
+				continue
+			}
+			fname := sanitizeFilename(inc.ID) + b.OutputExtension()
+			dest := filepath.Join(outDir, fname)
+			if err := writeFileIfChanged(dest, rule, 0o644); err != nil {
+				log.Printf("[generate][%s] %s write %s: %v", modName, b.Name(), dest, err)
+				continue
+			}
+			written++
+			bundle = append(bundle, rule...)
+			if !bytes.HasSuffix(bundle, []byte("\n\n")) {
+				bundle = append(bundle, '\n')
+			}
+		}
+
+		if len(bundle) > 0 {
+			bundleDest := filepath.Join(rulesDir, "bundle"+b.OutputExtension())
+			if err := os.MkdirAll(filepath.Dir(bundleDest), 0o755); err == nil {
+				if err := writeFileIfChanged(bundleDest, bundle, 0o644); err != nil {
+					log.Printf("[generate][%s] %s bundle write: %v", modName, b.Name(), err)
+				}
+			}
+		}
+
+		log.Printf("[generate][%s] %s: %d rules written, %d skipped (no usable IOCs)", modName, b.Name(), written, skipped)
+	}
+	return nil
+}
+
+func sanitizeFilename(id string) string {
+	var sb strings.Builder
+	for _, r := range id {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			sb.WriteRune(r)
+		} else {
+			sb.WriteRune('_')
+		}
+	}
+	return sb.String()
 }
