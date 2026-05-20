@@ -3,6 +3,7 @@ package blogs
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"log"
@@ -33,10 +34,35 @@ type Client struct {
 // internal services.
 var sharedHTTPClient = newSafeHTTPClient(30 * time.Second)
 
+// sharedFeedClient is used for RSS/Atom feed fetches via gofeed. It disables
+// HTTP/2 because some CDN-hosted feeds (e.g. Sophos/Fastly) return HTTP/2
+// INTERNAL_ERROR when the connection is initiated by Go's HTTP/2 stack.
+var sharedFeedClient = newSafeHTTPClientHTTP1(30 * time.Second)
+
 func NewClient(parser BlogParser) *Client {
 	return &Client{
 		parser: parser,
 		http:   sharedHTTPClient,
+	}
+}
+
+func newSafeHTTPClientHTTP1(timeout time.Duration) *http.Client {
+	dialer := &net.Dialer{
+		Timeout: timeout,
+		Control: ssrfSafeControl,
+	}
+	transport := &http.Transport{
+		DialContext:           dialer.DialContext,
+		ForceAttemptHTTP2:     false,
+		TLSNextProto:          make(map[string]func(string, *tls.Conn) http.RoundTripper),
+		MaxIdleConns:          100,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	}
+	return &http.Client{
+		Timeout:   timeout,
+		Transport: transport,
 	}
 }
 
@@ -82,8 +108,7 @@ func (c *Client) Probe(ctx context.Context, maxArticles int) ProbeResult {
 		IOCs:    make(map[string]int),
 	}
 
-	fp := gofeed.NewParser()
-	feed, err := fp.ParseURLWithContext(c.parser.FeedURL(), ctx)
+	feed, err := c.fetchFeed(ctx, c.parser.FeedURL())
 	if err != nil {
 		r.FeedErr = err.Error()
 		return r
@@ -120,8 +145,7 @@ func (c *Client) Probe(ctx context.Context, maxArticles int) ProbeResult {
 }
 
 func (c *Client) Fetch(ctx context.Context, since time.Time) ([]*incident.Incident, error) {
-	fp := gofeed.NewParser()
-	feed, err := fp.ParseURLWithContext(c.parser.FeedURL(), ctx)
+	feed, err := c.fetchFeed(ctx, c.parser.FeedURL())
 	if err != nil {
 		return nil, fmt.Errorf("fetch rss %s: %w", c.parser.FeedURL(), err)
 	}
@@ -161,6 +185,29 @@ func (c *Client) Fetch(ctx context.Context, since time.Time) ([]*incident.Incide
 		incidents = append(incidents, inc)
 	}
 	return incidents, nil
+}
+
+// fetchFeed retrieves an RSS/Atom feed and parses it via gofeed.
+// HTTP/2 is disabled because some CDN-fronted feeds (Sophos/Fastly, etc.) return
+// HTTP/2 INTERNAL_ERROR from peer when Go's H2 stack initiates the connection.
+// The feed body is streamed directly to the parser — no intermediate buffer —
+// so oversized feeds (e.g. Project Zero's 13 MB full-content Atom) aren't OOM'd.
+func (c *Client) fetchFeed(ctx context.Context, feedURL string) (*gofeed.Feed, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, feedURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "Dragnet-CTI-Bot/1.0 (+https://github.com/dragnet-dev/dragnet)")
+	resp, err := sharedFeedClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("http error: %s", resp.Status)
+	}
+	fp := gofeed.NewParser()
+	return fp.Parse(resp.Body)
 }
 
 func (c *Client) fetchHTML(ctx context.Context, rawURL string) (string, error) {

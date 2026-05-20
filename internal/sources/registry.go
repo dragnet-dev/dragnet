@@ -24,11 +24,8 @@ import (
 	"github.com/dragnet-dev/dragnet/internal/sources/blogs/horizon3"
 	"github.com/dragnet-dev/dragnet/internal/sources/blogs/malwarebytes"
 	"github.com/dragnet-dev/dragnet/internal/sources/blogs/microsoft_sec"
-	"github.com/dragnet-dev/dragnet/internal/sources/blogs/phylum"
-	"github.com/dragnet-dev/dragnet/internal/sources/blogs/polyswarm"
 	"github.com/dragnet-dev/dragnet/internal/sources/blogs/project_zero"
 	"github.com/dragnet-dev/dragnet/internal/sources/blogs/proofpoint"
-	"github.com/dragnet-dev/dragnet/internal/sources/blogs/rapid7"
 	"github.com/dragnet-dev/dragnet/internal/sources/blogs/red_canary"
 	"github.com/dragnet-dev/dragnet/internal/sources/blogs/secureworks"
 	"github.com/dragnet-dev/dragnet/internal/sources/blogs/sekoia"
@@ -86,7 +83,7 @@ func All() []Source {
 		blogs.NewClient(aikido.New()),
 		blogs.NewClient(stepsecurity.New()),
 		blogs.NewClient(sonatype.New()),
-		blogs.NewClient(phylum.New()),
+		// phylum: sunseted — blog TLS/CDN broken, company pivoted away from public IOC research
 		// ── Supply: API Intel ──────────────────────────────────────────────
 		snyk.New(),
 		// deps_dev removed — its v3alpha/advisories endpoint was retired
@@ -97,7 +94,7 @@ func All() []Source {
 		malware_bazaar.New(),
 		urlhaus.New(),
 		// ── Malware: Blog Intel ────────────────────────────────────────────
-		blogs.NewClient(polyswarm.New()),
+		// polyswarm: removed — polyswarm.network has no RSS feed (site restructured)
 		blogs.NewClient(dfir_report.New()),
 		blogs.NewClient(elastic_labs.New()),
 		blogs.NewClient(unit42.New()),
@@ -124,7 +121,7 @@ func All() []Source {
 		// documents which would be a separate large source rewrite for
 		// data already covered.
 		blogs.NewClient(project_zero.New()),
-		blogs.NewClient(rapid7.New()),
+		// rapid7: removed — blog feed returns 404 (site restructured); AttackerKB covers their CVE research
 		attackerkb.New(),
 		blogs.NewClient(greynoise.New()),
 		blogs.NewClient(horizon3.New()),

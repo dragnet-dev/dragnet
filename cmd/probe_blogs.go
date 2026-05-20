@@ -89,10 +89,11 @@ func runProbeBlogs(_ *cobra.Command, _ []string) error {
 
 	printProbeTable(results)
 
-	// Exit non-zero if any parser is definitively broken.
+	// no-iocs is a warning, not a failure — news/analysis blogs legitimately
+	// produce no IOC tables in their most recent articles. Only dead feeds fail.
 	for _, r := range results {
-		if r.Status() == "feed-err" || r.Status() == "no-iocs" {
-			return fmt.Errorf("one or more parsers are unhealthy (see table above)")
+		if r.Status() == "feed-err" {
+			return fmt.Errorf("one or more feed URLs are broken (see table above)")
 		}
 	}
 	return nil
