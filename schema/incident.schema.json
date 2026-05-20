@@ -1,159 +1,1037 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/dragnet-dev/dragnet/schema/incident.schema.json",
-  "title": "Dragnet Incident",
-  "type": "object",
-  "required": ["id", "attack_type", "severity", "description", "references"],
-  "additionalProperties": true,
-  "properties": {
-    "id": {
-      "type": "string",
-      "pattern": "^[a-z][a-z0-9_]+-[a-z0-9._-]+$",
-      "description": "Incident ID: {source}-{source-specific-key}. Source-prefixed (urlhaus-NNNN, cisa-cveYYYYNNNN, ossf-osv-id, trivy-cveYYYYNNNN, dragnet-{module}-YYYY-NNNN, etc.). The original strict pattern (^{type}-YYYY-NNN+$) described an aspirational scheme that never matched real-world source data and gated nothing in the pipeline — relaxed in v0.1.10 to describe what dragnet actually emits."
-    },
-    "osv_id":  { "type": "string" },
-    "ghsa_id": { "type": "string" },
-    "packages": {
-      "type": "array",
-      "minItems": 1,
-      "items": {
-        "type": "object",
-        "required": ["name", "ecosystem"],
-        "properties": {
-          "name":      { "type": "string" },
-          "ecosystem": {
-            "type": "string",
-            "enum": ["npm", "pypi", "cargo", "nuget", "rubygems", "go", "maven", "hex", "packagist", "pub", "github-actions", "huggingface"]
+  "$ref": "#/$defs/Incident",
+  "$defs": {
+    "AffectedImage": {
+      "properties": {
+        "repository": {
+          "type": "string"
+        },
+        "os_family": {
+          "type": "string"
+        },
+        "vulnerable_tags": {
+          "items": {
+            "type": "string"
           },
-          "affected_versions": {
-            "type": "array",
-            "items": { "type": "string" }
-          }
+          "type": "array"
+        },
+        "fixed_tag": {
+          "type": "string"
+        },
+        "cve_ids": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "confidence": {
+          "type": "number"
+        },
+        "sources": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         }
-      }
-    },
-    "attack_type": {
-      "type": "string",
-      "enum": [
-        "account_takeover",
-        "typosquat",
-        "dep_confusion",
-        "poisoned_maintainer",
-        "malicious_publish",
-        "ci_poisoning",
-        "namespace_squatting",
-        "vulnerability",
-        "exploit",
-        "ransomware",
-        "container_vulnerability",
-        "eol",
-        "model_poisoning"
+      },
+      "type": "object",
+      "required": [
+        "repository",
+        "vulnerable_tags"
       ]
     },
-    "severity": {
-      "type": "string",
-      "enum": ["critical", "high", "medium", "low"]
-    },
-    "compromise_window": {
-      "type": "object",
+    "AffectedSoftware": {
       "properties": {
-        "start": { "type": "string", "format": "date-time" },
-        "end":   { "type": "string", "format": "date-time" }
-      }
-    },
-    "campaign": {
-      "type": "object",
-      "properties": {
-        "name":       { "type": "string" },
-        "actor":      { "type": "string" },
-        "confidence": { "type": "string", "enum": ["low", "medium", "high"] }
-      }
-    },
-    "description": { "type": "string", "minLength": 10 },
-    "references": {
-      "type": "array",
-      "minItems": 1,
-      "items": { "type": "string", "format": "uri" }
-    },
-    "exposure":   { "type": "object" },
-    "indicators": {
-      "type": "object",
-      "properties": {
-        "workflow_indicators": {
-          "type": "array",
-          "items": {
-            "type": "object",
-            "required": ["type", "value"],
-            "properties": {
-              "type":       { "type": "string", "enum": ["exfil_pattern", "malicious_step", "env_access"] },
-              "value":      { "type": "string" },
-              "sources":    { "type": "array", "items": { "type": "string" } },
-              "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
-            }
-          }
+        "vendor": {
+          "type": "string"
         },
-        "model_indicators": {
-          "type": "array",
+        "product": {
+          "type": "string"
+        },
+        "versions_affected": {
           "items": {
-            "type": "object",
-            "required": ["type"],
-            "properties": {
-              "type":        { "type": "string", "enum": ["format_downgrade", "unexpected_binary", "malicious_model_card"] },
-              "filename":    { "type": "string" },
-              "value":       { "type": "string" },
-              "description": { "type": "string" },
-              "sources":     { "type": "array", "items": { "type": "string" } },
-              "confidence":  { "type": "number", "minimum": 0, "maximum": 1 }
-            }
-          }
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "versions_patched": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         }
-      }
+      },
+      "type": "object"
     },
-    "hunting":    { "type": "object" },
-    "detection_targets": {
-      "type": "array",
-      "items": {
-        "type": "string",
-        "enum": ["network", "process", "file", "persistence"]
-      }
-    },
-    "container_ext": {
+    "Behaviour": {
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "detection_target": {
+          "type": "string"
+        },
+        "platform": {
+          "type": "string"
+        }
+      },
       "type": "object",
+      "required": [
+        "id",
+        "description",
+        "detection_target",
+        "platform"
+      ]
+    },
+    "CVEExtension": {
+      "properties": {
+        "cve_id": {
+          "type": "string"
+        },
+        "cvss_score": {
+          "type": "number"
+        },
+        "cvss_vector": {
+          "type": "string"
+        },
+        "affected_software": {
+          "items": {
+            "$ref": "#/$defs/AffectedSoftware"
+          },
+          "type": "array"
+        },
+        "exploit_type": {
+          "type": "string"
+        },
+        "patch_available": {
+          "type": "boolean"
+        },
+        "patch_url": {
+          "type": "string"
+        },
+        "exploited_in_wild": {
+          "type": "boolean"
+        },
+        "exploit_public": {
+          "type": "boolean"
+        },
+        "http_indicators": {
+          "items": {
+            "$ref": "#/$defs/HTTPIndicator"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "Campaign": {
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "actor": {
+          "type": "string"
+        },
+        "confidence": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "Certificate": {
+      "properties": {
+        "subject": {
+          "type": "string"
+        },
+        "thumbprint": {
+          "type": "string"
+        },
+        "sources": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "confidence": {
+          "type": "number"
+        }
+      },
+      "type": "object"
+    },
+    "CompromiseWindow": {
+      "properties": {
+        "start": {
+          "type": "string"
+        },
+        "end": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "ContainerExtension": {
       "properties": {
         "affected_images": {
-          "type": "array",
           "items": {
-            "type": "object",
-            "required": ["repository", "vulnerable_tags"],
-            "properties": {
-              "repository":     { "type": "string" },
-              "os_family":      { "type": "string", "enum": ["alpine", "debian", "ubuntu", "rhel", "amazon"] },
-              "vulnerable_tags": { "type": "array", "items": { "type": "string" } },
-              "fixed_tag":      { "type": "string" },
-              "cve_ids":        { "type": "array", "items": { "type": "string" } },
-              "confidence":     { "type": "number", "minimum": 0, "maximum": 1 },
-              "sources":        { "type": "array", "items": { "type": "string" } }
-            }
-          }
+            "$ref": "#/$defs/AffectedImage"
+          },
+          "type": "array"
         },
         "eol_images": {
-          "type": "array",
           "items": {
-            "type": "object",
-            "required": ["repository", "cycle", "eol_date"],
-            "properties": {
-              "repository":  { "type": "string" },
-              "cycle":       { "type": "string" },
-              "eol_date":    { "type": "string" },
-              "replacement": { "type": "string" }
-            }
-          }
+            "$ref": "#/$defs/EOLImageInfo"
+          },
+          "type": "array"
         },
-        "cvss_score":        { "type": "number", "minimum": 0, "maximum": 10 },
-        "exploited_in_wild": { "type": "boolean" },
-        "public_poc":        { "type": "boolean" },
-        "tier":              { "type": "integer", "minimum": 1, "maximum": 3 }
-      }
+        "cvss_score": {
+          "type": "number"
+        },
+        "exploited_in_wild": {
+          "type": "boolean"
+        },
+        "public_poc": {
+          "type": "boolean"
+        },
+        "tier": {
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "CredentialTargets": {
+      "properties": {
+        "env_vars": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "metadata_endpoints": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "vault_types": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "CrossDomainLink": {
+      "properties": {
+        "module": {
+          "type": "string"
+        },
+        "incident_id": {
+          "type": "string"
+        },
+        "relationship": {
+          "type": "string"
+        },
+        "actor": {
+          "type": "string"
+        },
+        "shared_ioc": {
+          "$ref": "#/$defs/SharedIOC"
+        },
+        "confidence": {
+          "type": "number"
+        }
+      },
+      "type": "object",
+      "required": [
+        "module",
+        "incident_id",
+        "relationship"
+      ]
+    },
+    "DetectionRule": {
+      "properties": {
+        "backend": {
+          "type": "string"
+        },
+        "layer": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "type": "object",
+      "required": [
+        "backend",
+        "layer",
+        "path"
+      ]
+    },
+    "EOLImageInfo": {
+      "properties": {
+        "repository": {
+          "type": "string"
+        },
+        "cycle": {
+          "type": "string"
+        },
+        "eol_date": {
+          "type": "string"
+        },
+        "replacement": {
+          "type": "string"
+        }
+      },
+      "type": "object",
+      "required": [
+        "repository",
+        "cycle",
+        "eol_date"
+      ]
+    },
+    "EvasionIndicators": {
+      "properties": {
+        "russian_locale_check": {
+          "type": "boolean"
+        },
+        "min_cpu_count": {
+          "type": "integer"
+        },
+        "geofenced_countries": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "Exposure": {
+      "properties": {
+        "lockfile_signatures": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "file_presence": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "ide_artifacts": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "hooks": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "git_dependencies": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "FileHash": {
+      "properties": {
+        "algorithm": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        },
+        "filename": {
+          "type": "string"
+        },
+        "sources": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "confidence": {
+          "type": "number"
+        }
+      },
+      "type": "object",
+      "required": [
+        "algorithm",
+        "value"
+      ]
+    },
+    "GitIndicators": {
+      "properties": {
+        "repo_descriptions": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "commit_messages": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "HTTPIndicator": {
+      "properties": {
+        "type": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        },
+        "sources": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "confidence": {
+          "type": "number"
+        }
+      },
+      "type": "object",
+      "required": [
+        "type",
+        "value"
+      ]
+    },
+    "Hunting": {
+      "properties": {
+        "mitre_techniques": {
+          "items": {
+            "$ref": "#/$defs/MITRETechnique"
+          },
+          "type": "array"
+        },
+        "behaviours": {
+          "items": {
+            "$ref": "#/$defs/Behaviour"
+          },
+          "type": "array"
+        },
+        "evasion_indicators": {
+          "$ref": "#/$defs/EvasionIndicators"
+        }
+      },
+      "type": "object"
+    },
+    "Incident": {
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "legacy_id": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "osv_id": {
+          "type": "string"
+        },
+        "ghsa_id": {
+          "type": "string"
+        },
+        "packages": {
+          "items": {
+            "$ref": "#/$defs/Package"
+          },
+          "type": "array"
+        },
+        "attack_type": {
+          "type": "string"
+        },
+        "severity": {
+          "type": "string"
+        },
+        "compromise_window": {
+          "$ref": "#/$defs/CompromiseWindow"
+        },
+        "campaign": {
+          "$ref": "#/$defs/Campaign"
+        },
+        "description": {
+          "type": "string"
+        },
+        "references": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "exposure": {
+          "$ref": "#/$defs/Exposure"
+        },
+        "indicators": {
+          "$ref": "#/$defs/Indicators"
+        },
+        "hunting": {
+          "$ref": "#/$defs/Hunting"
+        },
+        "detection_targets": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "malware_ext": {
+          "$ref": "#/$defs/MalwareExtension"
+        },
+        "ransomware_ext": {
+          "$ref": "#/$defs/RansomwareExtension"
+        },
+        "cve_ext": {
+          "$ref": "#/$defs/CVEExtension"
+        },
+        "container_ext": {
+          "$ref": "#/$defs/ContainerExtension"
+        },
+        "sources": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "cross_domain_links": {
+          "items": {
+            "$ref": "#/$defs/CrossDomainLink"
+          },
+          "type": "array"
+        },
+        "cross_domain_sources": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "actor_ids": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "detection_rules": {
+          "items": {
+            "$ref": "#/$defs/DetectionRule"
+          },
+          "type": "array"
+        },
+        "impact": {
+          "$ref": "#/$defs/IncidentImpact"
+        },
+        "typosquat": {
+          "$ref": "#/$defs/TyposquatDetails"
+        }
+      },
+      "type": "object",
+      "required": [
+        "id",
+        "packages",
+        "attack_type",
+        "severity",
+        "description",
+        "references"
+      ]
+    },
+    "IncidentImpact": {
+      "properties": {
+        "packages": {
+          "items": {
+            "$ref": "#/$defs/PackageImpact"
+          },
+          "type": "array"
+        },
+        "overall_impact_rating": {
+          "type": "string"
+        },
+        "total_weekly_downloads": {
+          "type": "integer"
+        },
+        "typosquat_target_impact": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "IndicatorValue": {
+      "properties": {
+        "value": {
+          "type": "string"
+        },
+        "sources": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "confidence": {
+          "type": "number"
+        }
+      },
+      "type": "object",
+      "required": [
+        "value"
+      ]
+    },
+    "Indicators": {
+      "properties": {
+        "domains": {
+          "items": {
+            "$ref": "#/$defs/IndicatorValue"
+          },
+          "type": "array"
+        },
+        "ips": {
+          "items": {
+            "$ref": "#/$defs/IndicatorValue"
+          },
+          "type": "array"
+        },
+        "urls": {
+          "items": {
+            "$ref": "#/$defs/IndicatorValue"
+          },
+          "type": "array"
+        },
+        "session_network": {
+          "$ref": "#/$defs/SessionNetwork"
+        },
+        "file_hashes": {
+          "items": {
+            "$ref": "#/$defs/FileHash"
+          },
+          "type": "array"
+        },
+        "file_names": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "file_paths": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "persistence": {
+          "$ref": "#/$defs/Persistence"
+        },
+        "git_indicators": {
+          "$ref": "#/$defs/GitIndicators"
+        },
+        "credential_targets": {
+          "$ref": "#/$defs/CredentialTargets"
+        },
+        "workflow_indicators": {
+          "items": {
+            "$ref": "#/$defs/WorkflowIndicator"
+          },
+          "type": "array"
+        },
+        "model_indicators": {
+          "items": {
+            "$ref": "#/$defs/ModelIndicator"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "MITRETechnique": {
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "type": "object",
+      "required": [
+        "id",
+        "name"
+      ]
+    },
+    "MalwareExtension": {
+      "properties": {
+        "malware_family": {
+          "type": "string"
+        },
+        "malware_type": {
+          "type": "string"
+        },
+        "targeted_sectors": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "targeted_countries": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "platforms": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "mutexes": {
+          "items": {
+            "$ref": "#/$defs/IndicatorValue"
+          },
+          "type": "array"
+        },
+        "registry_keys": {
+          "items": {
+            "$ref": "#/$defs/IndicatorValue"
+          },
+          "type": "array"
+        },
+        "scheduled_tasks": {
+          "items": {
+            "$ref": "#/$defs/IndicatorValue"
+          },
+          "type": "array"
+        },
+        "named_pipes": {
+          "items": {
+            "$ref": "#/$defs/IndicatorValue"
+          },
+          "type": "array"
+        },
+        "user_agents": {
+          "items": {
+            "$ref": "#/$defs/IndicatorValue"
+          },
+          "type": "array"
+        },
+        "yara_rules": {
+          "items": {
+            "$ref": "#/$defs/YaraRule"
+          },
+          "type": "array"
+        },
+        "certificates": {
+          "items": {
+            "$ref": "#/$defs/Certificate"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "ModelIndicator": {
+      "properties": {
+        "type": {
+          "type": "string"
+        },
+        "filename": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "sources": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "confidence": {
+          "type": "number"
+        }
+      },
+      "type": "object",
+      "required": [
+        "type"
+      ]
+    },
+    "ObservedTool": {
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        },
+        "purpose": {
+          "type": "string"
+        }
+      },
+      "type": "object",
+      "required": [
+        "name"
+      ]
+    },
+    "Package": {
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "ecosystem": {
+          "type": "string"
+        },
+        "affected_versions": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object",
+      "required": [
+        "name",
+        "ecosystem"
+      ]
+    },
+    "PackageImpact": {
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "ecosystem": {
+          "type": "string"
+        },
+        "weekly_downloads": {
+          "type": "integer"
+        },
+        "monthly_downloads": {
+          "type": "integer"
+        },
+        "impact_rating": {
+          "type": "string"
+        },
+        "ecosystem_percentile": {
+          "type": "number"
+        },
+        "fetched_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "type": "object",
+      "required": [
+        "name",
+        "ecosystem",
+        "weekly_downloads",
+        "impact_rating",
+        "fetched_at"
+      ]
+    },
+    "Persistence": {
+      "properties": {
+        "service_names": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "macos_launchagent": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "linux_systemd": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "RansomwareExtension": {
+      "properties": {
+        "ransomware_group": {
+          "type": "string"
+        },
+        "operation_type": {
+          "type": "string"
+        },
+        "affiliate_model": {
+          "type": "string"
+        },
+        "targeted_sectors": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "targeted_countries": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "ransom_note_strings": {
+          "items": {
+            "$ref": "#/$defs/IndicatorValue"
+          },
+          "type": "array"
+        },
+        "encrypted_file_extensions": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "ransom_note_filenames": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "tools_observed": {
+          "items": {
+            "$ref": "#/$defs/ObservedTool"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "SessionNetwork": {
+      "properties": {
+        "recipient_id": {
+          "type": "string"
+        },
+        "seed_nodes": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "file_server": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "SharedIOC": {
+      "properties": {
+        "type": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        }
+      },
+      "type": "object",
+      "required": [
+        "type",
+        "value"
+      ]
+    },
+    "TyposquatDetails": {
+      "properties": {
+        "new_package": {
+          "type": "string"
+        },
+        "target_package": {
+          "type": "string"
+        },
+        "target_weekly_downloads": {
+          "type": "integer"
+        },
+        "target_impact_rating": {
+          "type": "string"
+        },
+        "similarity_score": {
+          "type": "number"
+        },
+        "technique": {
+          "type": "string"
+        }
+      },
+      "type": "object",
+      "required": [
+        "new_package",
+        "target_package",
+        "target_weekly_downloads",
+        "target_impact_rating",
+        "similarity_score",
+        "technique"
+      ]
+    },
+    "WorkflowIndicator": {
+      "properties": {
+        "type": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        },
+        "sources": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "confidence": {
+          "type": "number"
+        }
+      },
+      "type": "object",
+      "required": [
+        "type",
+        "value"
+      ]
+    },
+    "YaraRule": {
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "sources": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "confidence": {
+          "type": "number"
+        },
+        "body": {
+          "type": "string"
+        }
+      },
+      "type": "object",
+      "required": [
+        "name"
+      ]
     }
-  }
+  },
+  "title": "Dragnet Incident",
+  "description": "A Dragnet security incident record. Produced by dragnet sync and consumed by port, buoy, scope, and third-party SIEM integrations. Schema is auto-generated from internal/incident/schema.go — do not edit by hand."
 }
