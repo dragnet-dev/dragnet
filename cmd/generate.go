@@ -180,6 +180,16 @@ func runGenerate(_ *cobra.Command, _ []string) error {
 			}
 		}
 
+		// Backfill DetectionRules into incidents. Scan every rule output
+		// directory (sigma source + all compiled backends) for files whose
+		// names start with a known incident ID, then write the associations
+		// back to the JSONL shards so port/buoy/scope can link directly to
+		// detection content without walking satellite repos themselves.
+		backfillDetectionRules(modName, modIncidents, sigmaRoot, be, rootFor, wantYARA)
+		if err := index.WriteAllJSONLShards(modIncidents, modCfg.OutputDir); err != nil {
+			log.Printf("[generate][%s] rewrite shards with detection_rules: %v", modName, err)
+		}
+
 		if wantSTIX {
 			stixOutDir := moduleSTIXDir(genSTIXRoot, modCfg.OutputDir)
 			if err := writeModuleSTIX(modName, modIncidents, stixOutDir); err != nil {
@@ -606,6 +616,111 @@ func compileIOCNativeBackends(
 		log.Printf("[generate][%s] %s: %d rules written, %d skipped (no usable IOCs)", modName, b.Name(), written, skipped)
 	}
 	return nil
+}
+
+// backfillDetectionRules scans all rule output directories for files matching
+// each incident's dragnet ID and writes the results to inc.DetectionRules.
+// This lets port/buoy/scope display the detection rules accordion without
+// walking satellite repos — incidents carry their own rule manifest.
+//
+// Scan order: sigma source dir first, then each compiled backend dir, then
+// IOC-native (YARA) dir. Only sigma and IOC-native backends produce files named
+// directly after the incident ID; compiled backends mirror the sigma directory
+// structure so we can extract incident IDs the same way.
+func backfillDetectionRules(
+	modName string,
+	incidents []*incident.Incident,
+	sigmaRoot string,
+	be []backends.Backend,
+	rootFor func(string) string,
+	includeYARA bool,
+) {
+	if len(incidents) == 0 {
+		return
+	}
+
+	// Build set of known incident IDs for fast prefix matching.
+	knownIDs := make(map[string]*incident.Incident, len(incidents))
+	for _, inc := range incidents {
+		if inc.ID != "" {
+			knownIDs[inc.ID] = inc
+			// Clear existing DetectionRules so this pass is idempotent.
+			inc.DetectionRules = nil
+		}
+	}
+
+	// scanDir walks a rule directory and adds DetectionRule entries to each
+	// matched incident. dirRoot is stripped from file paths to produce the
+	// module-relative path stored in DetectionRule.Path.
+	scanDir := func(dir, backend, dirRoot string) {
+		_ = filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+			if err != nil || d.IsDir() {
+				return nil
+			}
+			base := d.Name()
+			// Match known incident IDs as a prefix of the filename.
+			var matchedInc *incident.Incident
+			for id, inc := range knownIDs {
+				if strings.HasPrefix(base, id) {
+					matchedInc = inc
+					break
+				}
+			}
+			if matchedInc == nil {
+				return nil
+			}
+
+			// Derive layer from path: {dir}/{layer}/{year}/{file}
+			rel, err := filepath.Rel(dir, path)
+			if err != nil {
+				rel = base
+			}
+			parts := strings.SplitN(rel, string(filepath.Separator), 3)
+			layer := ""
+			if len(parts) >= 2 {
+				layer = parts[0]
+			}
+
+			// Path relative to module root in the satellite repo.
+			modulePath, _ := filepath.Rel(dirRoot, path)
+
+			matchedInc.DetectionRules = append(matchedInc.DetectionRules, incident.DetectionRule{
+				Backend: backend,
+				Layer:   layer,
+				Path:    filepath.ToSlash(modulePath),
+			})
+			return nil
+		})
+	}
+
+	// Sigma source.
+	// sigmaRoot = {satellite}/{module}/rules/sigma — module root is two levels up.
+	sigmaModuleRoot := filepath.Dir(filepath.Dir(sigmaRoot)) // {satellite}/{module}
+	scanDir(sigmaRoot, "sigma", sigmaModuleRoot)
+
+	// Compiled backends.
+	for _, b := range be {
+		root := rootFor(b.Name())
+		compiledDir := filepath.Join(root, "rules", b.Name())
+		if _, err := os.Stat(compiledDir); err == nil {
+			scanDir(compiledDir, b.Name(), root)
+		}
+	}
+
+	// IOC-native (YARA).
+	if includeYARA {
+		root := rootFor("yara")
+		yaraDir := filepath.Join(root, "rules", "yara")
+		if _, err := os.Stat(yaraDir); err == nil {
+			scanDir(yaraDir, "yara", root)
+		}
+	}
+
+	total := 0
+	for _, inc := range incidents {
+		total += len(inc.DetectionRules)
+	}
+	log.Printf("[generate][%s] detection_rules: %d rule refs across %d incidents", modName, total, len(incidents))
 }
 
 func sanitizeFilename(id string) string {
