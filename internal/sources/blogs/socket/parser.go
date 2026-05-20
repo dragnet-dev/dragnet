@@ -50,10 +50,6 @@ func (p *Parser) ParseIOCs(htmlStr string) ([]blogs.RawIOC, []blogs.AffectedPack
 	}
 	findH2(doc)
 
-	if iocH2 == nil {
-		return nil, nil, nil
-	}
-
 	var iocs []blogs.RawIOC
 	seen := map[string]bool{}
 
@@ -65,29 +61,43 @@ func (p *Parser) ParseIOCs(htmlStr string) ([]blogs.RawIOC, []blogs.AffectedPack
 		}
 	}
 
-	// Walk siblings after H2
-	currentSection := ""
-	currentFilename := ""
+	if iocH2 != nil {
+		// Walk siblings after the IOC H2
+		currentSection := ""
+		currentFilename := ""
 
-	for sib := iocH2.NextSibling; sib != nil; sib = sib.NextSibling {
-		if sib.Type != html.ElementNode {
-			continue
-		}
-		if sib.Data == "h2" {
-			break
-		}
-		if sib.Data == "h3" {
-			currentSection = strings.TrimSpace(textContent(sib))
-			currentFilename = ""
-			continue
-		}
+		for sib := iocH2.NextSibling; sib != nil; sib = sib.NextSibling {
+			if sib.Type != html.ElementNode {
+				continue
+			}
+			if sib.Data == "h2" {
+				break
+			}
+			if sib.Data == "h3" {
+				currentSection = strings.ToLower(strings.TrimSpace(textContent(sib)))
+				currentFilename = ""
+				continue
+			}
 
-		switch strings.ToLower(currentSection) {
-		case "files":
-			parseSocketFilesNode(sib, &currentFilename, p.Name(), addIOC)
-		case "network":
-			parseSocketNetworkNode(sib, p.Name(), addIOC)
+			// Section matching is substring-based — Socket has changed headings
+			// like "Network" → "Network Indicators", "Files" → "File Hashes", etc.
+			switch {
+			case strings.Contains(currentSection, "file") || strings.Contains(currentSection, "hash"):
+				parseSocketFilesNode(sib, &currentFilename, p.Name(), addIOC)
+			case strings.Contains(currentSection, "network") || strings.Contains(currentSection, "domain") || strings.Contains(currentSection, "ip"):
+				parseSocketNetworkNode(sib, p.Name(), addIOC)
+			case strings.Contains(currentSection, "package") || strings.Contains(currentSection, "npm") || strings.Contains(currentSection, "supply"):
+				for _, pkg := range blogs.ExtractPackages(textContent(sib)) {
+					addIOC(blogs.RawIOC{Type: "package_" + pkg.Ecosystem, Value: pkg.Name, Source: p.Name()})
+				}
+			}
 		}
+	}
+
+	// Fallback: extract scoped npm packages from full article text — catches
+	// supply chain reports where IOCs are package names in narrative prose.
+	for _, pkg := range blogs.ExtractPackages(htmlStr) {
+		addIOC(blogs.RawIOC{Type: "package_" + pkg.Ecosystem, Value: pkg.Name, Source: p.Name()})
 	}
 
 	return iocs, nil, nil
