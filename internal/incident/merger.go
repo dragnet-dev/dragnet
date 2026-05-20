@@ -376,10 +376,17 @@ func unionPackages(group []*Incident) []Package {
 	return out
 }
 
+// maxReferencesPerIncident caps references on merged incidents. URLHaus and other
+// bulk sources can accumulate hundreds of unique URLs for the same cluster.
+const maxReferencesPerIncident = 20
+
 func collectReferences(group []*Incident) []string {
 	var all []string
 	for _, inc := range group {
 		all = append(all, inc.References...)
+	}
+	if len(all) > maxReferencesPerIncident {
+		all = all[:maxReferencesPerIncident]
 	}
 	return all
 }

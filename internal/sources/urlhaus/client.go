@@ -122,10 +122,11 @@ func urlToIncident(id, urlStr, threat, tags string, t time.Time) *incident.Incid
 	// these are aliases of tracked actors in the ATT&CK store. Pre-v0.1.10
 	// this signal was dropped on the floor and 99.9% of urlhaus records had
 	// no actor attribution.
+	// URLHaus threat labels are malware family/campaign names, not actor names.
+	// Leave Actor empty — we don't know the threat actor from distribution URLs alone.
 	camp := incident.Campaign{}
 	if threat != "" && threat != "unknown" {
 		camp.Name = threat
-		camp.Actor = threat
 	}
 	return &incident.Incident{
 		ID:               "urlhaus-" + id,

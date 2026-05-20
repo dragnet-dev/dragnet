@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/dragnet-dev/dragnet/internal/confidence"
+	"github.com/dragnet-dev/dragnet/internal/deconflict"
 	"github.com/dragnet-dev/dragnet/internal/incident"
 	"github.com/mmcdole/gofeed"
 )
@@ -340,11 +341,34 @@ func mergePackages(primary, generic []AffectedPackage) []AffectedPackage {
 	return out
 }
 
+// blogAttackTypes maps blog source names to their primary attack classification.
+// Sources not listed default to "malware" (generic threat intelligence).
+var blogAttackTypes = map[string]string{
+	"socket":       "malicious_publish",
+	"aikido":       "malicious_publish",
+	"sonatype":     "malicious_publish",
+	"stepsecurity": "ci_poisoning",
+	"project_zero": "vulnerability",
+	"greynoise":    "vulnerability",
+	"horizon3":     "vulnerability",
+	"tenable":      "vulnerability",
+	"watchtowr":    "vulnerability",
+}
+
+func blogAttackType(source string) string {
+	if t, ok := blogAttackTypes[source]; ok {
+		return t
+	}
+	return "malware"
+}
+
 func iocsToDraftIncident(source, ref, title string, pubTime *time.Time, iocs []RawIOC, pkgs []AffectedPackage) *incident.Incident {
 	inc := &incident.Incident{
-		ID:         blogIncidentID(source, ref, title),
-		Source:     source,
-		References: []string{ref},
+		ID:          blogIncidentID(source, ref, title),
+		Source:      source,
+		Description: title,
+		AttackType:  blogAttackType(source),
+		References:  []string{ref},
 	}
 	if pubTime != nil && !pubTime.IsZero() {
 		inc.CompromiseWindow.Start = pubTime.Format(time.RFC3339)
@@ -364,12 +388,20 @@ func iocsToDraftIncident(source, ref, title string, pubTime *time.Time, iocs []R
 	for _, ioc := range iocs {
 		switch ioc.Type {
 		case "domain":
+			val := strings.TrimRight(ioc.Value, ".")
+			if val == "" {
+				continue
+			}
 			inc.Indicators.Domains = append(inc.Indicators.Domains, incident.IndicatorValue{
-				Value: ioc.Value, Sources: []string{ioc.Source}, Confidence: conf,
+				Value: val, Sources: []string{ioc.Source}, Confidence: conf,
 			})
 		case "ip":
+			val := strings.TrimRight(ioc.Value, ".")
+			if deconflict.IP(val) {
+				continue
+			}
 			inc.Indicators.IPs = append(inc.Indicators.IPs, incident.IndicatorValue{
-				Value: ioc.Value, Sources: []string{ioc.Source}, Confidence: conf,
+				Value: val, Sources: []string{ioc.Source}, Confidence: conf,
 			})
 		case "url":
 			inc.Indicators.URLs = append(inc.Indicators.URLs, incident.IndicatorValue{
