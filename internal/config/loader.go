@@ -10,6 +10,7 @@ import (
 type Config struct {
 	Modules            map[string]ModuleConfig            `yaml:"modules"`
 	CrossEnrichment    CrossEnrichConfig                  `yaml:"cross_enrichment"`
+	OnlineEnrichment   OnlineEnrichConfig                 `yaml:"online_enrichment"`
 	MultiDomainSources map[string]MultiDomainSourceConfig `yaml:"multi_domain_sources,omitempty"`
 }
 
@@ -41,6 +42,17 @@ type ModuleConfig struct {
 type CVSSThresholdConfig struct {
 	Tier2 float64 `yaml:"tier2,omitempty"` // minimum CVSS for Tier 2 (default 9.0)
 	Tier3 float64 `yaml:"tier3,omitempty"` // minimum CVSS for Tier 3 (default 7.0)
+}
+
+// OnlineEnrichConfig controls online infrastructure enrichment via RIPEstat,
+// Shodan InternetDB, and crt.sh.
+type OnlineEnrichConfig struct {
+	Enabled        bool `yaml:"enabled"`
+	RIPEstat       bool `yaml:"ripestat"`
+	ShodanInternetDB bool `yaml:"shodan_internetdb"`
+	CRTSh          bool `yaml:"crtsh"`
+	CRTShMaxRelated int  `yaml:"crtsh_max_related"`
+	CacheTTLDays   int  `yaml:"cache_ttl_days"`
 }
 
 // CrossEnrichConfig controls cross-domain IOC boosting and linking.
@@ -165,6 +177,14 @@ func Default() *Config {
 			ConfidenceBoostPerDomain: 0.08,
 			LinkSharedActors:         true,
 			LinkSharedInfrastructure: true,
+		},
+		OnlineEnrichment: OnlineEnrichConfig{
+			Enabled:          true,
+			RIPEstat:         true,
+			ShodanInternetDB: true,
+			CRTSh:            true,
+			CRTShMaxRelated:  20,
+			CacheTTLDays:     30,
 		},
 	}
 }

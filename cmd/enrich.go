@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"log"
 	"os"
 	"path/filepath"
@@ -8,8 +9,10 @@ import (
 
 	"github.com/dragnet-dev/dragnet/internal/config"
 	"github.com/dragnet-dev/dragnet/internal/enrichment"
+	onlineenrich "github.com/dragnet-dev/dragnet/internal/enrichment/online"
 	"github.com/dragnet-dev/dragnet/internal/incident"
 	"github.com/dragnet-dev/dragnet/internal/index"
+	"github.com/dragnet-dev/dragnet/internal/state"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 )
@@ -20,16 +23,24 @@ var enrichCmd = &cobra.Command{
 	RunE:  runEnrich,
 }
 
-var enrichCrossDomain bool
+var (
+	enrichCrossDomain bool
+	enrichOnline      bool
+	enrichCacheFile   string
+)
 
 func init() {
 	enrichCmd.Flags().BoolVar(&enrichCrossDomain, "cross-domain", false,
 		"Apply cross-domain IOC confidence boosting and actor/infrastructure linking")
+	enrichCmd.Flags().BoolVar(&enrichOnline, "online", false,
+		"Enrich IP/domain IOCs via RIPEstat, Shodan InternetDB, and crt.sh")
+	enrichCmd.Flags().StringVar(&enrichCacheFile, "cache-file", "state/enrichment-cache.json",
+		"Path to the online enrichment cache file")
 }
 
 func runEnrich(_ *cobra.Command, _ []string) error {
-	if !enrichCrossDomain {
-		log.Println("[enrich] nothing to do — pass --cross-domain")
+	if !enrichCrossDomain && !enrichOnline {
+		log.Println("[enrich] nothing to do — pass --cross-domain and/or --online")
 		return nil
 	}
 
@@ -56,30 +67,73 @@ func runEnrich(_ *cobra.Command, _ []string) error {
 		log.Printf("[enrich] loaded %d incidents from %s", len(incidents), modName)
 	}
 
-	enr := enrichment.New(cfg.CrossEnrichment)
-	enr.Enrich(allModules)
+	if enrichCrossDomain {
+		enr := enrichment.New(cfg.CrossEnrichment)
+		enr.Enrich(allModules)
+	}
+
+	if enrichOnline {
+		cache, err := state.LoadEnrichmentCache(enrichCacheFile)
+		if err != nil {
+			log.Printf("[enrich] load cache %s: %v (starting fresh)", enrichCacheFile, err)
+			cache = state.NewEnrichmentCache()
+		}
+		enr := onlineenrich.New(cfg.OnlineEnrichment, cache)
+		n := enr.EnrichAll(context.Background(), allModules)
+		log.Printf("[enrich] online: %d new enrichments", n)
+		if err := state.SaveEnrichmentCache(enrichCacheFile, cache); err != nil {
+			log.Printf("[enrich] save cache: %v", err)
+		}
+	}
 
 	// Persist enriched results. The bulk dataset lives in all/*.jsonl
-	// (re-written here so cross_domain_links are visible to downstream
-	// consumers); the per-incident YAMLs we still rewrite in case anyone
-	// has hand-curated drafts that need the link annotations too.
+	// (re-written here so cross_domain_links / ip_enrichment / domain_enrichment
+	// are visible to downstream consumers); per-incident YAMLs rewritten only
+	// when cross-domain links are present (online metadata only lives in JSONL).
 	for modName, incidents := range allModules {
 		outDir := moduleOutDir[modName]
-		linked := 0
+
+		needsPersist := false
 		for _, inc := range incidents {
 			if len(inc.CrossDomainLinks) > 0 || len(inc.CrossDomainSources) > 0 {
-				linked++
+				needsPersist = true
+				break
+			}
+			if enrichOnline {
+				for _, ip := range inc.Indicators.IPs {
+					if ip.IPEnrich != nil {
+						needsPersist = true
+						break
+					}
+				}
+				if needsPersist {
+					break
+				}
+				for _, d := range inc.Indicators.Domains {
+					if d.DomainEnrich != nil {
+						needsPersist = true
+						break
+					}
+				}
+			}
+			if needsPersist {
+				break
 			}
 		}
-		if linked == 0 {
+		if !needsPersist {
 			continue
 		}
-		log.Printf("[enrich] %s: %d incidents gained cross-domain links", modName, linked)
 
+		log.Printf("[enrich] persisting %s shards", modName)
 		if err := index.WriteAllJSONLShards(incidents, outDir); err != nil {
 			log.Printf("[enrich] persist %s shards: %v", modName, err)
 		}
 
+		if !enrichCrossDomain {
+			continue
+		}
+		// Rewrite per-incident YAMLs only for cross-domain links (online
+		// enrichment metadata is JSONL-only to avoid YAML churn).
 		incidentsDir := filepath.Join(outDir, "incidents")
 		for _, inc := range incidents {
 			if len(inc.CrossDomainLinks) == 0 && len(inc.CrossDomainSources) == 0 {

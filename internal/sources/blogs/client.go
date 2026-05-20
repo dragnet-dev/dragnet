@@ -107,9 +107,14 @@ func (c *Client) fetchHTML(ctx context.Context, rawURL string) (string, error) {
 	return string(body), nil
 }
 
-// newSafeHTTPClient returns an http.Client whose Dialer rejects connections
+// NewSafeHTTPClient returns an http.Client whose Dialer rejects connections
 // to private, loopback, and link-local addresses. Suitable for fetchers that
 // follow URLs from untrusted upstream sources (RSS feeds, blog posts).
+// Exported so other packages (e.g. online enrichers) can reuse it.
+func NewSafeHTTPClient(timeout time.Duration) *http.Client {
+	return newSafeHTTPClient(timeout)
+}
+
 func newSafeHTTPClient(timeout time.Duration) *http.Client {
 	dialer := &net.Dialer{
 		Timeout: timeout,

@@ -291,6 +291,27 @@ type IndicatorValue struct {
 	Value      string   `yaml:"value" json:"value"`
 	Sources    []string `yaml:"sources,omitempty" json:"sources,omitempty"`
 	Confidence float64  `yaml:"confidence,omitempty" json:"confidence,omitempty"`
+	// Set by dragnet enrich --online
+	IPEnrich     *IPEnrichment     `yaml:"ip_enrichment,omitempty" json:"ip_enrichment,omitempty"`
+	DomainEnrich *DomainEnrichment `yaml:"domain_enrichment,omitempty" json:"domain_enrichment,omitempty"`
+}
+
+// IPEnrichment holds infrastructure metadata for an IP indicator, populated by
+// RIPEstat (ASN/country/prefix) and Shodan InternetDB (ports/tags/CVEs).
+type IPEnrichment struct {
+	ASN       string   `yaml:"asn,omitempty" json:"asn,omitempty"`             // "AS7922 Comcast Cable"
+	Country   string   `yaml:"country,omitempty" json:"country,omitempty"`     // "US"
+	BGPPrefix string   `yaml:"bgp_prefix,omitempty" json:"bgp_prefix,omitempty"` // "73.0.0.0/8"
+	Ports     []int    `yaml:"ports,omitempty" json:"ports,omitempty"`
+	Tags      []string `yaml:"tags,omitempty" json:"tags,omitempty"`
+	CVEs      []string `yaml:"cves,omitempty" json:"cves,omitempty"`
+}
+
+// DomainEnrichment holds certificate-transparency metadata for a domain
+// indicator, populated by crt.sh (related domains sharing the same cert).
+type DomainEnrichment struct {
+	RelatedDomains []string `yaml:"related_domains,omitempty" json:"related_domains,omitempty"`
+	CertIssuers    []string `yaml:"cert_issuers,omitempty" json:"cert_issuers,omitempty"`
 }
 
 type SessionNetwork struct {
