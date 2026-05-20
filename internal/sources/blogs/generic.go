@@ -196,10 +196,14 @@ var (
 	reGenericSHA1           = regexp.MustCompile(`\b[0-9a-fA-F]{40}\b`)
 	reGenericMD5            = regexp.MustCompile(`\b[0-9a-fA-F]{32}\b`)
 
-	// Scoped npm packages: @scope/name — unambiguous and safe to extract from any text.
-	reNPMScoped = regexp.MustCompile(`@[a-z0-9][-a-z0-9.]{0,100}/[a-z0-9][-a-z0-9._]{0,100}`)
-	// PyPI: pip install <name> patterns
-	rePipInstall = regexp.MustCompile(`(?i)pip(?:3)?\s+install\s+([\w][\w.-]{1,100})`)
+	// Scoped npm packages: @scope/name[@version] — version suffix is optional.
+	reNPMScoped = regexp.MustCompile(`@[a-z0-9][-a-z0-9.]{0,100}/[a-z0-9][-a-z0-9._]{0,100}(?:@([^\s"'<>,]+))?`)
+	// PyPI: pip install <name>[==version] patterns
+	rePipInstall = regexp.MustCompile(`(?i)pip(?:3)?\s+install\s+([\w][\w.-]{1,100})(?:\s*([<>=!~^]{1,3}\s*[\w.*+!-]+(?:\s*,\s*[<>=!~^]{1,3}\s*[\w.*+!-]+)*))?`)
+	// Bare pip version constraint: name==1.0.0 or name>=2.0 in requirements files.
+	rePipVersioned = regexp.MustCompile(`\b([a-zA-Z][a-zA-Z0-9._-]{1,100})\s*([<>=!~^]{1,3}\s*[\w.*+!-]+(?:\s*,\s*[<>=!~^]{1,3}\s*[\w.*+!-]+)*)\b`)
+	// npm install <name>[@version] (unscoped)
+	reNPMInstall = regexp.MustCompile(`(?i)npm\s+(?:install|i|add)\s+([\w][\w.-]{0,100})(?:@([^\s"'<>,]+))?`)
 )
 
 // NormalizeIOC cleans a raw IOC value extracted from a table cell. It
@@ -212,8 +216,11 @@ var (
 var NormalizeIOC = iocutil.Normalize
 
 // ExtractPackages scans plain text extracted from HTML for package name patterns.
-// It catches scoped npm packages (@scope/name) and pip install commands.
-// Results are deduped and ecosystem-tagged.
+// It catches scoped npm packages, npm install commands, pip install commands, and
+// bare versioned pip requirements (name==x.y.z). Version constraints are captured
+// when present so callers can populate AffectedVersions.
+// Results are deduped; when the same package name appears with and without a version,
+// the versioned entry wins.
 func ExtractPackages(htmlStr string) []AffectedPackage {
 	doc, err := html.Parse(strings.NewReader(htmlStr))
 	if err != nil {
@@ -223,23 +230,87 @@ func ExtractPackages(htmlStr string) []AffectedPackage {
 	extractPlainText(doc, &textBuf)
 	text := textBuf.String()
 
-	seen := map[string]bool{}
-	var out []AffectedPackage
+	// seen tracks best known version per "ecosystem|name" key.
+	seen := map[string]string{} // key → version (empty = no version seen yet)
+	var order []string           // insertion order for deterministic output
 
-	for _, m := range reNPMScoped.FindAllString(text, -1) {
-		if !seen[m] {
-			seen[m] = true
-			out = append(out, AffectedPackage{Name: m, Ecosystem: "npm"})
+	add := func(eco, name, version string) {
+		key := eco + "|" + strings.ToLower(name)
+		existing, ok := seen[key]
+		if !ok {
+			order = append(order, key)
+			seen[key] = version
+		} else if existing == "" && version != "" {
+			// Upgrade no-version entry with a versioned one.
+			seen[key] = version
 		}
 	}
-	for _, sub := range rePipInstall.FindAllStringSubmatch(text, -1) {
-		name := sub[1]
-		if !seen[name] {
-			seen[name] = true
-			out = append(out, AffectedPackage{Name: name, Ecosystem: "pypi"})
+
+	for _, sub := range reNPMScoped.FindAllStringSubmatch(text, -1) {
+		name := sub[0]
+		version := ""
+		if len(sub) > 1 {
+			version = sub[1]
 		}
+		// Strip version suffix from the name string itself.
+		if version != "" && strings.HasSuffix(name, "@"+version) {
+			name = strings.TrimSuffix(name, "@"+version)
+		}
+		add("npm", name, version)
+	}
+
+	for _, sub := range reNPMInstall.FindAllStringSubmatch(text, -1) {
+		name, version := sub[1], ""
+		if len(sub) > 2 {
+			version = sub[2]
+		}
+		add("npm", name, version)
+	}
+
+	for _, sub := range rePipInstall.FindAllStringSubmatch(text, -1) {
+		name, version := sub[1], ""
+		if len(sub) > 2 {
+			version = strings.TrimSpace(sub[2])
+		}
+		add("pypi", name, version)
+	}
+
+	for _, sub := range rePipVersioned.FindAllStringSubmatch(text, -1) {
+		name, version := sub[1], strings.TrimSpace(sub[2])
+		// Only accept plausible package names — skip words that are clearly English prose.
+		if looksLikePackageName(name) {
+			add("pypi", name, version)
+		}
+	}
+
+	out := make([]AffectedPackage, 0, len(order))
+	for _, key := range order {
+		parts := strings.SplitN(key, "|", 2)
+		out = append(out, AffectedPackage{
+			Ecosystem: parts[0],
+			Name:      parts[1],
+			Version:   seen[key],
+		})
 	}
 	return out
+}
+
+// looksLikePackageName returns true for strings that plausibly name a Python package
+// (contains a digit, hyphen, or underscore, or is all-lowercase with no spaces).
+// Rejects common English words that happen to match the versioned-constraint regex.
+func looksLikePackageName(s string) bool {
+	if len(s) < 2 || len(s) > 80 {
+		return false
+	}
+	for _, r := range s {
+		if r >= 'A' && r <= 'Z' {
+			return false // prose word starting with capital
+		}
+		if r == '_' || r == '-' || (r >= '0' && r <= '9') {
+			return true // underscore/hyphen/digit strongly suggests package name
+		}
+	}
+	return true
 }
 
 func extractGenericRegexIOCs(htmlStr, source string) []RawIOC {

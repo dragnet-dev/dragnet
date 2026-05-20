@@ -27,6 +27,7 @@ type RawIOC struct {
 type AffectedPackage struct {
 	Name      string
 	Ecosystem string
+	Version   string // specific version or constraint extracted from article text, if any
 }
 
 // supplyChainKeywords are matched against RSS post titles and descriptions to

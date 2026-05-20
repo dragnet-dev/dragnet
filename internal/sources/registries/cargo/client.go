@@ -78,26 +78,36 @@ func analyseItem(item *gofeed.Item) *incident.Incident {
 }
 
 func buildDraftIncident(item *gofeed.Item, reason string) *incident.Incident {
-	name := extractCrateName(item.Title)
+	name, version := extractCrateNameVersion(item.Title)
+	pkg := incident.Package{Name: name, Ecosystem: "cargo"}
+	if version != "" {
+		pkg.AffectedVersions = []string{version}
+	}
 	return &incident.Incident{
 		ID:          fmt.Sprintf("cargo-draft-%s", sanitize(name)),
 		Description: fmt.Sprintf("Suspicious crates.io publish: %s — %s", item.Title, reason),
 		AttackType:  "typosquat",
 		Severity:    "medium",
 		References:  []string{item.Link},
-		Packages: []incident.Package{
-			{Name: name, Ecosystem: "cargo"},
-		},
+		Packages:    []incident.Package{pkg},
 	}
 }
 
-func extractCrateName(title string) string {
+func extractCrateNameVersion(title string) (name, version string) {
 	// Atom titles are typically "crate-name 0.1.0"
 	parts := strings.Fields(title)
-	if len(parts) > 0 {
-		return parts[0]
+	if len(parts) >= 2 {
+		return parts[0], parts[1]
 	}
-	return title
+	if len(parts) == 1 {
+		return parts[0], ""
+	}
+	return title, ""
+}
+
+func extractCrateName(title string) string {
+	name, _ := extractCrateNameVersion(title)
+	return name
 }
 
 // isTyposquat returns true when name is suspiciously close to target but not equal.

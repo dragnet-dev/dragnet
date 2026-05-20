@@ -351,10 +351,14 @@ func iocsToDraftIncident(source, ref, title string, pubTime *time.Time, iocs []R
 	}
 	inc.Packages = make([]incident.Package, 0, len(pkgs))
 	for _, pkg := range pkgs {
-		inc.Packages = append(inc.Packages, incident.Package{
+		p := incident.Package{
 			Name:      pkg.Name,
 			Ecosystem: pkg.Ecosystem,
-		})
+		}
+		if pkg.Version != "" {
+			p.AffectedVersions = []string{pkg.Version}
+		}
+		inc.Packages = append(inc.Packages, p)
 	}
 	conf := confidence.Calculate([]string{source})
 	for _, ioc := range iocs {

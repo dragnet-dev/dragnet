@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/dragnet-dev/dragnet/internal/incident"
@@ -103,10 +104,14 @@ func ghsaToIncident(a *ghsaAdvisory) *incident.Incident {
 	}
 
 	for _, v := range a.Vulnerabilities {
-		inc.Packages = append(inc.Packages, incident.Package{
+		pkg := incident.Package{
 			Name:      v.Package.Name,
 			Ecosystem: normaliseEco(v.Package.Ecosystem),
-		})
+		}
+		if v.VulnerableVersionRange != "" {
+			pkg.AffectedVersions = parseVersionRange(v.VulnerableVersionRange)
+		}
+		inc.Packages = append(inc.Packages, pkg)
 	}
 
 	if len(inc.Packages) > 0 {
@@ -128,6 +133,20 @@ func normaliseSeverity(s string) string {
 	default:
 		return "low"
 	}
+}
+
+// parseVersionRange splits a GHSA vulnerable_version_range string
+// (">=1.0, <2.0" or "= 1.2.3") into individual constraint tokens.
+func parseVersionRange(r string) []string {
+	parts := strings.Split(r, ",")
+	var out []string
+	for _, p := range parts {
+		t := strings.TrimSpace(p)
+		if t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 func normaliseEco(eco string) string {
