@@ -10,9 +10,10 @@ var keywords = []string{
 type Parser struct{ inner *blogs.GenericParser }
 
 func New() *Parser {
+	// secureworks.com was acquired by Sophos; blog now lives at sophos.com.
 	return &Parser{inner: blogs.NewGenericParser(
 		"secureworks",
-		"https://www.secureworks.com/blog/feed",
+		"https://www.sophos.com/en-us/blog/feed",
 		keywords,
 	)}
 }

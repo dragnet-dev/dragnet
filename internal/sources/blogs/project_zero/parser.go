@@ -12,7 +12,8 @@ type Parser struct{ inner *blogs.GenericParser }
 func New() *Parser {
 	return &Parser{inner: blogs.NewGenericParser(
 		"project_zero",
-		"https://googleprojectzero.blogspot.com/feeds/posts/default",
+		// Blog moved from blogspot to projectzero.google in 2025.
+		"https://projectzero.google/feed.xml",
 		keywords,
 	)}
 }
