@@ -38,6 +38,11 @@ var osvEcoName = map[string]string{
 	"packagist":      "Packagist",
 	"pub":            "Pub",
 	"github-actions": "GitHub Actions",
+	// OS package ecosystems — used by os-packages module
+	"debian": "Debian",
+	"ubuntu": "Ubuntu",
+	"alpine": "Alpine",
+	"rhel":   "RHEL",
 }
 
 // localEcoName maps OSV ecosystem names back to our internal names.
@@ -53,6 +58,19 @@ var localEcoName = map[string]string{
 	"Packagist":      "packagist",
 	"Pub":            "pub",
 	"GitHub Actions": "github-actions",
+	// OS package ecosystems
+	"Debian": "debian",
+	"Ubuntu": "ubuntu",
+	"Alpine": "alpine",
+	"RHEL":   "rhel",
+}
+
+// OSEcosystems is the set of OS package ecosystems used by the os-packages module.
+var OSEcosystems = map[string]bool{
+	"Debian": true,
+	"Ubuntu": true,
+	"Alpine": true,
+	"RHEL":   true,
 }
 
 // bulkEcosystems are the ecosystems for which OSV publishes bulk exports.
@@ -66,6 +84,8 @@ var bulkEcosystems = []string{
 	"npm", "PyPI", "crates.io",
 	"Maven", "NuGet", "RubyGems", "Go", "Hex", "Packagist", "Pub",
 	"GitHub Actions", // CI workflow action advisories
+	// OS package ecosystems — fetched for the os-packages module
+	"Debian", "Ubuntu", "Alpine", "RHEL",
 }
 
 // Client implements the Source interface for OSV.

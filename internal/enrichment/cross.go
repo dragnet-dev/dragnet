@@ -31,6 +31,11 @@ func (e *CrossEnricher) Enrich(allModules map[string][]*incident.Incident) {
 		return
 	}
 
+	// OS packages ↔ container cross-domain linking via shared CVE IDs.
+	if len(allModules["os-packages"]) > 0 && len(allModules["container"]) > 0 {
+		LinkOSToContainer(allModules["os-packages"], allModules["container"])
+	}
+
 	// Build IOC index: value → list of (module, incident)
 	iocIndex := map[string][]iocAppearance{}
 	for module, incidents := range allModules {

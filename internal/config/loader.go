@@ -59,7 +59,7 @@ type AutomergeConfig struct {
 }
 
 // ModuleNames is the canonical ordered list of Dragnet domains.
-var ModuleNames = []string{"supply", "malware", "ransomware", "cve", "container"}
+var ModuleNames = []string{"supply", "malware", "ransomware", "cve", "container", "os-packages"}
 
 // Load reads dragnet.yaml from path. Returns Default() if the file does not exist.
 func Load(path string) (*Config, error) {
@@ -147,6 +147,16 @@ func Default() *Config {
 					TrustedSources: []string{"trivy_db", "cisa"},
 					MinIOCs:        1,
 					DelayMinutes:   30,
+				},
+			},
+			"os-packages": {
+				OutputDir:  "os-packages",
+				Ecosystems: []string{"debian", "ubuntu", "alpine", "rhel"},
+				Sources:    map[string]bool{"osv": true},
+				Automerge: AutomergeConfig{
+					TrustedSources: []string{"osv"},
+					MinIOCs:        1,
+					DelayMinutes:   60,
 				},
 			},
 		},
