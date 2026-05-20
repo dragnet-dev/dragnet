@@ -612,11 +612,16 @@ func buildRichDescription(inc *incident.Incident) string {
 	}
 
 	if len(inc.Description) > 10 && !strings.HasPrefix(inc.Description, "Incident: ") {
-		// Defensive: collapse any internal whitespace so embedded
-		// descriptions can't break the rule's YAML block scalar. The
-		// ingest layer (ransomware_live, etc.) is the primary defence;
-		// this catches anything that slips through.
-		parts = append(parts, strings.Join(strings.Fields(inc.Description), " "))
+		// Collapse whitespace and strip YAML-illegal control characters
+		// (U+0000–U+001F excluding tab/newline/CR) that can come from
+		// NVD or Trivy descriptions.
+		clean := strings.Map(func(r rune) rune {
+			if r < 0x20 && r != '\t' && r != '\n' && r != '\r' {
+				return -1
+			}
+			return r
+		}, inc.Description)
+		parts = append(parts, strings.Join(strings.Fields(clean), " "))
 	}
 
 	if inc.CompromiseWindow.Start != "" {

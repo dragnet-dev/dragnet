@@ -14,7 +14,7 @@ type LogScaleBackend struct{}
 
 func NewLogScale() *LogScaleBackend { return &LogScaleBackend{} }
 
-func (b *LogScaleBackend) Name() string            { return "crowdstrike-logscale" }
+func (b *LogScaleBackend) Name() string            { return "crowdstrike" }
 func (b *LogScaleBackend) OutputExtension() string { return ".lqs" }
 
 func (b *LogScaleBackend) Compile(sigmaYAML []byte) ([]byte, error) {
