@@ -66,3 +66,46 @@ func (m *Manager) Save(path string, s *State) error {
 	}
 	return os.WriteFile(path, data, 0o644)
 }
+
+// LoadImagePackages reads the image→[]packageName map from state/image_packages.json.
+// Returns a nil map (no error) when the file doesn't exist yet — callers treat
+// nil as "gate disabled."
+func LoadImagePackages(stateDir string) (map[string][]string, error) {
+	path := stateDir + "/image_packages.json"
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var m map[string][]string
+	if err := json.Unmarshal(data, &m); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
+// WriteImagePackages saves the image→[]packageName map to state/image_packages.json.
+func WriteImagePackages(stateDir string, packages map[string][]string) error {
+	data, err := json.MarshalIndent(packages, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(stateDir+"/image_packages.json", data, 0o644)
+}
+
+// ImagePackagesAsSet collapses an image→[]packageName map into a flat set of
+// package names. Returns nil when packages is empty.
+func ImagePackagesAsSet(packages map[string][]string) map[string]bool {
+	if len(packages) == 0 {
+		return nil
+	}
+	set := make(map[string]bool)
+	for _, pkgs := range packages {
+		for _, p := range pkgs {
+			set[p] = true
+		}
+	}
+	return set
+}

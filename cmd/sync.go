@@ -412,6 +412,12 @@ func runSync(_ *cobra.Command, _ []string) error {
 			log.Printf("[sync][%s] CVE quality filter: %d -> %d (kept KEV / CVSS>=9 / public PoC)", modName, before, len(incidents))
 		}
 
+		if modName == "os-packages" {
+			before := len(incidents)
+			incidents = filterOSPackages(incidents, filepath.Join(dataDir(), "state"))
+			log.Printf("[sync][%s] OS package filter: %d -> %d (high/critical, fix or KEV)", modName, before, len(incidents))
+		}
+
 		// Load whatever is already on disk and fold it into the fetched set
 		// before MergeAll. Without this, each cycle's persist call wipes any
 		// incident that wasn't refreshed within the current `since` window —
@@ -501,7 +507,7 @@ func runSync(_ *cobra.Command, _ []string) error {
 	// for downstream consumers, and cve/container records are encyclopedic by
 	// nature so they're cheapest to drop.
 	if !syncDryRun {
-		dedupAcrossModules(moduleIncidents, []string{"supply", "malware", "ransomware", "cve", "container"})
+		dedupAcrossModules(moduleIncidents, []string{"supply", "malware", "ransomware", "cve", "container", "os-packages"})
 		// Re-persist any module that lost records — writes are idempotent
 		// (wipe-then-write) so this just refreshes the on-disk shape.
 		for _, modName := range moduleNames {
@@ -1310,4 +1316,24 @@ func buildSigmaEligibleSet(module string, incidents []*incident.Incident, applyC
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+// filterOSPackages narrows an os-packages incident set to high-signal advisories:
+// severity high/critical, has a fix version or is KEV-listed. When
+// state/image_packages.json exists it additionally restricts to packages present
+// in popular container images; when the file is absent that gate is skipped.
+func filterOSPackages(incidents []*incident.Incident, stateDir string) []*incident.Incident {
+	// Load image packages if available; nil = gate disabled.
+	imgPackageMap, err := state.LoadImagePackages(stateDir)
+	if err != nil {
+		log.Printf("[sync][os-packages] load image_packages.json: %v (skipping image-presence gate)", err)
+	}
+	var imgPkgSet map[string]bool
+	if len(imgPackageMap) > 0 {
+		imgPkgSet = state.ImagePackagesAsSet(imgPackageMap)
+		log.Printf("[sync][os-packages] image-presence gate active: %d unique packages", len(imgPkgSet))
+	}
+
+	filter := osv.NewOSFilter(imgPkgSet, true)
+	return filter.FilterAll(incidents)
 }

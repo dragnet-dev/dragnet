@@ -58,6 +58,11 @@ type Incident struct {
 	// Written by the actor attribution pass — slugs of attributed actor profiles.
 	ActorIDs []string `yaml:"actor_ids,omitempty" json:"actor_ids,omitempty"`
 
+	// Written by dragnet generate — one entry per rule file generated for this
+	// incident across all backends. Lets consumers (port, scope, buoy) link
+	// directly to the detection content without scanning satellite repos.
+	DetectionRules []DetectionRule `yaml:"detection_rules,omitempty" json:"detection_rules,omitempty"`
+
 	// Written by dragnet sync when popularity data is available
 	Impact        *IncidentImpact   `yaml:"impact,omitempty" json:"impact,omitempty"`
 	TyposquatInfo *TyposquatDetails `yaml:"typosquat,omitempty" json:"typosquat,omitempty"`
@@ -207,6 +212,19 @@ type ContainerExtension struct {
 	ExploitedInWild bool            `yaml:"exploited_in_wild,omitempty" json:"exploited_in_wild,omitempty"`
 	PublicPoC       bool            `yaml:"public_poc,omitempty" json:"public_poc,omitempty"`
 	Tier            int             `yaml:"tier,omitempty" json:"tier,omitempty"` // 1=KEV 2=CVSS≥9 3=CVSS≥7+PoC
+}
+
+// ── DETECTION RULE REFS ────────────────────────────────────────────────────
+
+// DetectionRule is a pointer from an incident to one generated rule file.
+// Path is relative to the module root within its satellite repo so consumers
+// can construct raw GitHub URLs:
+//
+//	https://raw.githubusercontent.com/dragnet-dev/haul-rules-{backend}/main/{module}/{path}
+type DetectionRule struct {
+	Backend string `yaml:"backend" json:"backend"` // sigma | kql | splunk | yara | …
+	Layer   string `yaml:"layer" json:"layer"`     // ioc | exposure | hunting | malware | …
+	Path    string `yaml:"path" json:"path"`       // rules/sigma/ioc/2024/dragnet-malware-2024-0001-ioc-network.yaml
 }
 
 // ── CROSS-DOMAIN LINKS ─────────────────────────────────────────────────────
