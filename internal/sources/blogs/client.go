@@ -40,7 +40,84 @@ func NewClient(parser BlogParser) *Client {
 	}
 }
 
-func (c *Client) Name() string { return c.parser.Name() }
+func (c *Client) Name() string    { return c.parser.Name() }
+func (c *Client) Parser() BlogParser { return c.parser }
+
+// ProbeResult summarises a live RSS probe of one blog parser.
+type ProbeResult struct {
+	Name     string
+	FeedURL  string
+	Articles int            // items fetched from RSS (up to maxArticles)
+	Matched  int            // items that passed MatchesPost
+	IOCs     map[string]int // counts by type: "domain", "ip", "sha256", etc.
+	FeedErr  string         // non-empty when the RSS fetch itself failed
+	ParseErr string         // non-empty when ≥1 article HTML fetch failed
+}
+
+// Status returns a short label suitable for a table column.
+func (r *ProbeResult) Status() string {
+	if r.FeedErr != "" {
+		return "feed-err"
+	}
+	if r.Matched == 0 {
+		return "no-match"
+	}
+	total := 0
+	for _, n := range r.IOCs {
+		total += n
+	}
+	if total == 0 {
+		return "no-iocs"
+	}
+	return "ok"
+}
+
+// Probe fetches up to maxArticles items from the RSS feed and runs the parser
+// on each one that passes MatchesPost. Returns a ProbeResult summarising what
+// was found. Never returns an error — feed failures are captured in the result.
+func (c *Client) Probe(ctx context.Context, maxArticles int) ProbeResult {
+	r := ProbeResult{
+		Name:    c.parser.Name(),
+		FeedURL: c.parser.FeedURL(),
+		IOCs:    make(map[string]int),
+	}
+
+	fp := gofeed.NewParser()
+	feed, err := fp.ParseURLWithContext(c.parser.FeedURL(), ctx)
+	if err != nil {
+		r.FeedErr = err.Error()
+		return r
+	}
+
+	items := feed.Items
+	if len(items) > maxArticles {
+		items = items[:maxArticles]
+	}
+	r.Articles = len(items)
+
+	for _, item := range items {
+		desc := item.Description
+		if !c.parser.MatchesPost(item.Title, desc) {
+			continue
+		}
+		r.Matched++
+
+		html, err := c.fetchHTML(ctx, item.Link)
+		if err != nil {
+			r.ParseErr = err.Error()
+			continue
+		}
+		iocs, _, err := c.parser.ParseIOCs(html)
+		if err != nil {
+			r.ParseErr = err.Error()
+			continue
+		}
+		for _, ioc := range iocs {
+			r.IOCs[ioc.Type]++
+		}
+	}
+	return r
+}
 
 func (c *Client) Fetch(ctx context.Context, since time.Time) ([]*incident.Incident, error) {
 	fp := gofeed.NewParser()

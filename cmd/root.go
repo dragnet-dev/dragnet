@@ -43,4 +43,5 @@ func init() {
 	rootCmd.AddCommand(doctorCmd)
 	rootCmd.AddCommand(migrateIDsCmd)
 	rootCmd.AddCommand(pruneDraftsCmd)
+	rootCmd.AddCommand(probeBlogsCmd)
 }

@@ -140,6 +140,18 @@ func All() []Source {
 	}
 }
 
+// AllBlogClients returns every registered blog source as a *blogs.Client slice,
+// in the same order as All(). Used by the probe-blogs command.
+func AllBlogClients() []*blogs.Client {
+	var out []*blogs.Client
+	for _, s := range All() {
+		if c, ok := s.(*blogs.Client); ok {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
 // ByName returns only the sources whose Name() matches one of the given names.
 // It returns an error if any name has no corresponding registered source.
 func ByName(names []string) ([]Source, error) {
