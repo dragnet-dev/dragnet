@@ -116,6 +116,10 @@ type YaraRule struct {
 	SourceURL  string   `yaml:"source,omitempty" json:"source,omitempty"`
 	Sources    []string `yaml:"sources,omitempty" json:"sources,omitempty"`
 	Confidence float64  `yaml:"confidence,omitempty" json:"confidence,omitempty"`
+	// Body holds the full YARA rule text when the source provides it.
+	// When non-empty, the YARA backend emits it verbatim alongside any
+	// IOC-generated rules derived from the incident's indicators.
+	Body string `yaml:"body,omitempty" json:"body,omitempty"`
 }
 
 type Certificate struct {

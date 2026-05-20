@@ -15,6 +15,7 @@ import (
 	"github.com/dragnet-dev/dragnet/internal/backends/splunk"
 	"github.com/dragnet-dev/dragnet/internal/backends/suricata"
 	"github.com/dragnet-dev/dragnet/internal/backends/wazuh"
+	"github.com/dragnet-dev/dragnet/internal/backends/yara"
 )
 
 // All returns the default backend set for `--backends all`.
@@ -55,6 +56,14 @@ func AllIncludingRedundant(csIOCAction string) []Backend {
 	)
 }
 
+// AllIOCNative returns all registered IOCNativeBackend implementations.
+// These generate from incident data rather than compiled Sigma YAML.
+func AllIOCNative() []IOCNativeBackend {
+	return []IOCNativeBackend{
+		yara.New(),
+	}
+}
+
 // ByName returns only backends whose Name() matches one of the given names.
 // It returns an error if any name has no corresponding registered backend.
 // The special name "stix" is allowed as a generate-level flag, not a backend.
@@ -64,6 +73,7 @@ func ByName(names []string, csIOCAction string) ([]Backend, error) {
 		nameSet[n] = true
 	}
 	delete(nameSet, "stix") // handled at the generate layer, not a backend
+	delete(nameSet, "yara") // IOCNativeBackend — handled at the generate layer
 	var out []Backend
 	for _, b := range AllIncludingRedundant(csIOCAction) {
 		if nameSet[b.Name()] {
