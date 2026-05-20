@@ -58,8 +58,8 @@ func TestLogScaleCompileFileHash(t *testing.T) {
 
 func TestLogScaleBackendMeta(t *testing.T) {
 	b := crowdstrike.NewLogScale()
-	if b.Name() != "crowdstrike-logscale" {
-		t.Errorf("Name() = %q, want %q", b.Name(), "crowdstrike-logscale")
+	if b.Name() != "crowdstrike" {
+		t.Errorf("Name() = %q, want %q", b.Name(), "crowdstrike")
 	}
 	if b.OutputExtension() != ".lqs" {
 		t.Errorf("OutputExtension() = %q, want %q", b.OutputExtension(), ".lqs")
@@ -162,14 +162,10 @@ func TestIOCHuntingEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Compile: %v", err)
 	}
-	// Must be valid JSON
-	var v interface{}
-	if err := json.Unmarshal(got, &v); err != nil {
-		t.Fatalf("invalid JSON: %v\n%s", err, string(got))
-	}
-	arr, ok := v.([]interface{})
-	if !ok {
-		t.Fatalf("expected JSON array; got %T", v)
+	// Must be valid JSON array
+	var arr []json.RawMessage
+	if err := json.Unmarshal(got, &arr); err != nil {
+		t.Fatalf("invalid JSON array: %v\n%s", err, string(got))
 	}
 	if len(arr) != 0 {
 		t.Errorf("expected empty array for process rule; got %d entries", len(arr))
@@ -191,9 +187,9 @@ func TestIOCJSONValidity(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: Compile error: %v", f, err)
 		}
-		var v interface{}
-		if err := json.Unmarshal(got, &v); err != nil {
-			t.Errorf("%s: invalid JSON: %v\n%s", f, err, string(got))
+		var arr []json.RawMessage
+		if err := json.Unmarshal(got, &arr); err != nil {
+			t.Errorf("%s: invalid JSON array: %v\n%s", f, err, string(got))
 		}
 	}
 }

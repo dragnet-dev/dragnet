@@ -37,10 +37,13 @@ var doctorCmd = &cobra.Command{
 }
 
 var (
-	doctorModule     string
-	doctorRoot       string
-	doctorRulesRoot  string
-	doctorSTIXRoot   string
+	doctorModule          string
+	doctorRoot            string
+	doctorRulesRoot       string
+	doctorSTIXRoot        string
+	doctorCompiledRoot    string
+	doctorBackends        string
+	doctorFixStaleRules   bool
 )
 
 func init() {
@@ -54,6 +57,15 @@ func init() {
 	doctorCmd.Flags().StringVar(&doctorSTIXRoot, "check-stix", "",
 		"haul-stix checkout path. When set, doctor walks {check-stix}/{module}/feeds/stix/ "+
 			"and verifies every bundle's referenced incident IDs exist in haul.")
+	doctorCmd.Flags().StringVar(&doctorCompiledRoot, "compiled-root-base", "",
+		"Per-backend satellite repo base path (same value as generate --compiled-root-base). "+
+			"Required for --fix-stale-rules.")
+	doctorCmd.Flags().StringVar(&doctorBackends, "backends", "",
+		"Space or comma-separated backend names to check for stale paths. "+
+			"Required for --fix-stale-rules.")
+	doctorCmd.Flags().BoolVar(&doctorFixStaleRules, "fix-stale-rules", false,
+		"Remove stale {module}/rules/rules/ directories left by the pre-v0.1.18 "+
+			"compiledRootForBackend double-rules bug. Requires --compiled-root-base and --backends.")
 }
 
 // moduleReport captures everything we'll cross-check for one module.
@@ -130,11 +142,67 @@ func runDoctor(_ *cobra.Command, _ []string) error {
 		}
 	}
 
+	if doctorFixStaleRules {
+		if doctorCompiledRoot == "" || doctorBackends == "" {
+			return fmt.Errorf("--fix-stale-rules requires --compiled-root-base and --backends")
+		}
+		cleaned := fixStaleDoubleRulesPaths(doctorCompiledRoot, doctorBackends)
+		if cleaned > 0 {
+			log.Printf("[doctor][fix-stale-rules] removed %d stale rules/rules/ path(s) — satellite repos will be committed by the push step", cleaned)
+		} else {
+			log.Printf("[doctor][fix-stale-rules] no stale rules/rules/ paths found — already clean")
+		}
+	}
+
 	if issues > 0 {
 		return fmt.Errorf("doctor found %d inconsistency(ies)", issues)
 	}
 	log.Printf("[doctor] all modules consistent")
 	return nil
+}
+
+// fixStaleDoubleRulesPaths removes {base}-{backend}/{module}/rules/rules/
+// directories left behind by the pre-v0.1.18 compiledRootForBackend bug that
+// appended an extra "rules" segment to the per-backend output path.
+// After the fix, rules land at {module}/rules/{backend}/ — the old
+// {module}/rules/rules/{backend}/ directories are pure stale data.
+// Returns the count of directories removed.
+func fixStaleDoubleRulesPaths(compiledRootBase, backends string) int {
+	names := strings.FieldsFunc(backends, func(r rune) bool {
+		return r == ',' || r == ' '
+	})
+
+	removed := 0
+	for _, backend := range names {
+		if backend == "" {
+			continue
+		}
+		repoRoot := compiledRootBase + "-" + backend
+		// Walk module directories inside the satellite repo root.
+		entries, err := os.ReadDir(repoRoot)
+		if err != nil {
+			continue // repo not checked out, skip
+		}
+		for _, e := range entries {
+			if !e.IsDir() {
+				continue
+			}
+			// The stale path is {module}/rules/rules/ — detect by checking
+			// whether a "rules" subdirectory exists inside {module}/rules/.
+			stale := filepath.Join(repoRoot, e.Name(), "rules", "rules")
+			info, err := os.Stat(stale)
+			if err != nil || !info.IsDir() {
+				continue
+			}
+			if err := os.RemoveAll(stale); err != nil {
+				log.Printf("[doctor][fix-stale-rules] remove %s: %v", stale, err)
+				continue
+			}
+			log.Printf("[doctor][fix-stale-rules] removed %s", stale)
+			removed++
+		}
+	}
+	return removed
 }
 
 // checkRulesRepo walks {rulesRoot}/{module}/rules/sigma/ for YAML rule files
