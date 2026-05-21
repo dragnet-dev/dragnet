@@ -124,6 +124,7 @@ func runSync(_ *cobra.Command, _ []string) error {
 	}
 
 	moduleNames := resolveModules(syncModule)
+	explicitModule := syncModule != "all"
 
 	stateMgr := state.New()
 	st, err := stateMgr.Load(filepath.Join(dataDir(), "state/last_sync.json"))
@@ -222,7 +223,11 @@ func runSync(_ *cobra.Command, _ []string) error {
 	for _, modName := range moduleNames {
 		modCfg, ok := cfg.Modules[modName]
 		if !ok {
-			return fmt.Errorf("unknown module %q", modName)
+			if explicitModule {
+				return fmt.Errorf("unknown module %q", modName)
+			}
+			log.Printf("[sync] skipping module %q (not configured in dragnet.yaml)", modName)
+			continue
 		}
 
 		// Resolve the since timestamp for this module.

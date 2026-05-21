@@ -68,6 +68,7 @@ func runGenerate(_ *cobra.Command, _ []string) error {
 	}
 
 	moduleNames := resolveModules(genModule)
+	explicitModule := genModule != "all"
 
 	var be []backends.Backend
 	if genBackends == "all" {
@@ -99,7 +100,11 @@ func runGenerate(_ *cobra.Command, _ []string) error {
 	for _, modName := range moduleNames {
 		modCfg, ok := cfg.Modules[modName]
 		if !ok {
-			return fmt.Errorf("unknown module %q", modName)
+			if explicitModule {
+				return fmt.Errorf("unknown module %q", modName)
+			}
+			log.Printf("[generate] skipping module %q (not configured in dragnet.yaml)", modName)
+			continue
 		}
 
 		// Sigma rule source files. v0.1.11: when --rules-root is set, source
