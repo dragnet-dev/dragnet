@@ -25,7 +25,7 @@ var (
 
 func init() {
 	validateCmd.Flags().StringVar(&validateModule, "module", "all",
-		"Module to validate: supply|malware|ransomware|cve|all")
+		"Module to validate: supply|malware|ransomware|cve|container|os-packages|all")
 	validateCmd.Flags().BoolVar(&validateIncludeDrafts, "include-drafts", false,
 		"Also validate {module}/incidents/drafts/")
 }
@@ -38,11 +38,17 @@ func runValidate(_ *cobra.Command, _ []string) error {
 
 	moduleNames := resolveModules(validateModule)
 
+	explicitModule := validateModule != "all"
+
 	var failures []string
 	for _, modName := range moduleNames {
 		modCfg, ok := cfg.Modules[modName]
 		if !ok {
-			return fmt.Errorf("unknown module %q", modName)
+			if explicitModule {
+				return fmt.Errorf("unknown module %q", modName)
+			}
+			log.Printf("[validate] skipping module %q (not configured in dragnet.yaml)", modName)
+			continue
 		}
 
 		incidentsDir := filepath.Join(modCfg.OutputDir, "incidents")
