@@ -860,11 +860,14 @@ func (g *Generator) generateCVE(inc *incident.Incident, base TemplateData) error
 		}
 	}
 
-	// Web shell and post-exploit rules: only emit for high-signal CVEs.
-	// Generic post-exploit templates on every CVE bloat the rule set with
-	// low-value detections (CVSS 4 info-disclosure CVEs don't need web-shell
-	// rules). Gate on CVSS >= 9 or actively exploited in the wild.
-	if ext.CVEID != "" && (ext.CVSSScore >= 9.0 || ext.ExploitedInWild) {
+	// Web shell and post-exploit templates are generic hunting rules — the
+	// detection body is identical for every CVE (no CVE-specific patterns).
+	// Emitting 10K copies of the same "w3wp.exe spawned cmd.exe" rule adds
+	// pure noise to any SIEM import. Only emit when http_indicators are
+	// present: that data makes the templates unique and worth having.
+	// When NVD enrichment starts populating http_indicators these will
+	// automatically activate for the CVEs that warrant them.
+	if ext.CVEID != "" && len(ext.HTTPIndicators) > 0 {
 		for _, rule := range []struct {
 			tmpl    string
 			subtype string
