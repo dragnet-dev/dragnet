@@ -35,9 +35,9 @@ type ripestatGeoResp struct {
 // Returns empty strings on any error (non-fatal — data is best-effort).
 func enrichIPRIPE(ctx context.Context, client *http.Client, ip string) (asn, bgpPrefix, country string) {
 	asn, bgpPrefix = fetchRIPEPrefix(ctx, client, ip)
-	time.Sleep(200 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 	country = fetchRIPECountry(ctx, client, ip)
-	time.Sleep(200 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 	return asn, bgpPrefix, country
 }
 

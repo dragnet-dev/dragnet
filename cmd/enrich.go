@@ -78,8 +78,15 @@ func runEnrich(_ *cobra.Command, _ []string) error {
 			log.Printf("[enrich] load cache %s: %v (starting fresh)", enrichCacheFile, err)
 			cache = state.NewEnrichmentCache()
 		}
+		saveFn := func() {
+			if err := state.SaveEnrichmentCache(enrichCacheFile, cache); err != nil {
+				log.Printf("[enrich] periodic cache save: %v", err)
+			} else {
+				log.Printf("[enrich] periodic cache save: ok")
+			}
+		}
 		enr := onlineenrich.New(cfg.OnlineEnrichment, cache)
-		n := enr.EnrichAll(context.Background(), allModules)
+		n := enr.EnrichAllWithSave(context.Background(), allModules, saveFn)
 		log.Printf("[enrich] online: %d new enrichments", n)
 		if err := state.SaveEnrichmentCache(enrichCacheFile, cache); err != nil {
 			log.Printf("[enrich] save cache: %v", err)

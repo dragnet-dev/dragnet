@@ -19,7 +19,7 @@ type internetDBResp struct {
 // enrichIPInternetDB fetches open ports, Shodan tags, and known CVEs for ip.
 // Returns zero-value slices on 404 or any error.
 func enrichIPInternetDB(ctx context.Context, client *http.Client, ip string) (ports []int, tags, cves []string) {
-	defer func() { time.Sleep(time.Second) }()
+	defer func() { time.Sleep(200 * time.Millisecond) }()
 
 	url := fmt.Sprintf("%s/%s", internetDBBase, ip)
 	body, err := getJSON(ctx, client, url)

@@ -264,7 +264,9 @@ func ExtractPackages(htmlStr string) []AffectedPackage {
 		if len(sub) > 2 {
 			version = sub[2]
 		}
-		add("npm", name, version)
+		if looksLikePackageName(name) {
+			add("npm", name, version)
+		}
 	}
 
 	for _, sub := range rePipInstall.FindAllStringSubmatch(text, -1) {
@@ -272,7 +274,9 @@ func ExtractPackages(htmlStr string) []AffectedPackage {
 		if len(sub) > 2 {
 			version = strings.TrimSpace(sub[2])
 		}
-		add("pypi", name, version)
+		if looksLikePackageName(name) {
+			add("pypi", name, version)
+		}
 	}
 
 	for _, sub := range rePipVersioned.FindAllStringSubmatch(text, -1) {
@@ -295,16 +299,40 @@ func ExtractPackages(htmlStr string) []AffectedPackage {
 	return out
 }
 
-// looksLikePackageName returns true for strings that plausibly name a Python package
-// (contains a digit, hyphen, or underscore, or is all-lowercase with no spaces).
-// Rejects common English words that happen to match the versioned-constraint regex.
+// commonWords is a denylist of short English words that are not package names
+// but frequently appear after "npm install" or "pip install" in prose.
+var commonWords = map[string]bool{
+	"a": true, "an": true, "the": true, "to": true, "of": true, "in": true,
+	"on": true, "at": true, "by": true, "it": true, "is": true, "as": true,
+	"or": true, "if": true, "be": true, "do": true, "no": true, "so": true,
+	"go": true, "up": true, "my": true, "we": true, "us": true, "he": true,
+	"his": true, "her": true, "its": true, "our": true, "you": true,
+	"get": true, "set": true, "run": true, "use": true, "new": true,
+	"old": true, "add": true, "all": true, "and": true, "for": true,
+	"not": true, "but": true, "out": true, "one": true, "any": true,
+	"can": true, "may": true, "has": true, "had": true, "was": true,
+	"are": true, "via": true, "try": true, "let": true, "see": true,
+	"app": true, "api": true, "web": true, "bin": true, "src": true,
+	"lib": true, "dev": true, "log": true, "cli": true, "env": true,
+	"cfg": true, "tmp": true, "var": true, "pkg": true, "mod": true,
+	"test": true, "core": true, "util": true, "base": true, "main": true,
+	"init": true, "help": true, "info": true, "data": true, "file": true,
+	"list": true, "path": true, "name": true, "type": true, "mode": true,
+	"true": true, "false": true, "none": true, "null": true,
+}
+
+// looksLikePackageName returns true for strings that plausibly name a package.
+// Requires length >= 4, rejects prose words and capitalised strings.
 func looksLikePackageName(s string) bool {
-	if len(s) < 2 || len(s) > 80 {
+	if len(s) < 4 || len(s) > 80 {
+		return false
+	}
+	if commonWords[strings.ToLower(s)] {
 		return false
 	}
 	for _, r := range s {
 		if r >= 'A' && r <= 'Z' {
-			return false // prose word starting with capital
+			return false // prose word with capital
 		}
 		if r == '_' || r == '-' || (r >= '0' && r <= '9') {
 			return true // underscore/hyphen/digit strongly suggests package name

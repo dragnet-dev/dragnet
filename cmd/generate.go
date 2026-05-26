@@ -107,6 +107,24 @@ func runGenerate(_ *cobra.Command, _ []string) error {
 			continue
 		}
 
+		// Load incidents first so we can prune stale sigma rules during the
+		// file walk below. Pruning here means stale files are never fed to
+		// compileBackendsParallel and are removed from the sigma satellite
+		// before the push step, which keeps doctor's rules-ref check clean.
+		incidentsDir := filepath.Join(modCfg.OutputDir, "incidents")
+		modIncidents, err := loadModuleIncidentsFromShards(modName, incidentsDir)
+		if err != nil {
+			log.Printf("[generate][%s] load incidents: %v", modName, err)
+		}
+		allModuleIncidents[modName] = modIncidents
+
+		knownIDs := make(map[string]bool, len(modIncidents))
+		for _, inc := range modIncidents {
+			if inc.ID != "" {
+				knownIDs[inc.ID] = true
+			}
+		}
+
 		// Sigma rule source files. v0.1.11: when --rules-root is set, source
 		// sigma YAMLs live there too (written by sync). Read from the same
 		// root we'll write the compiled-backend outputs to so the relative
@@ -120,6 +138,7 @@ func runGenerate(_ *cobra.Command, _ []string) error {
 		rulesDir := moduleRulesDir(genRulesRoot, modCfg.OutputDir)
 		sigmaRoot := filepath.Join(rulesDir, "sigma")
 		var sigmaFiles []string
+		pruned := 0
 		if entries, err := os.ReadDir(sigmaRoot); err == nil {
 			for _, entry := range entries {
 				if !entry.IsDir() {
@@ -133,15 +152,34 @@ func runGenerate(_ *cobra.Command, _ []string) error {
 					if err != nil {
 						return err
 					}
-					if !d.IsDir() && strings.HasSuffix(d.Name(), ".yaml") {
-						sigmaFiles = append(sigmaFiles, path)
+					if d.IsDir() || !strings.HasSuffix(d.Name(), ".yaml") {
+						return nil
 					}
+					// Prune rules whose incident ID is no longer in haul.
+					// Only prune when we have a non-empty incident set — an
+					// empty set means incidents failed to load, not that all
+					// incidents were removed.
+					if len(knownIDs) > 0 {
+						data, readErr := os.ReadFile(path)
+						if readErr == nil {
+							if id := extractIncidentID(data); id != "" && !knownIDs[id] {
+								if removeErr := os.Remove(path); removeErr == nil {
+									pruned++
+									return nil
+								}
+							}
+						}
+					}
+					sigmaFiles = append(sigmaFiles, path)
 					return nil
 				})
 				if err != nil {
 					return err
 				}
 			}
+		}
+		if pruned > 0 {
+			log.Printf("[generate][%s] pruned %d stale sigma rule(s) referencing unknown incident IDs", modName, pruned)
 		}
 
 		// Compiled-backend output root. Three modes:
@@ -163,17 +201,6 @@ func runGenerate(_ *cobra.Command, _ []string) error {
 			rootFor = func(_ string) string { return modCfg.OutputDir }
 		}
 		compileBackendsParallel(modName, sigmaFiles, be, sigmaRoot, rootFor)
-
-		// Load module incidents from JSONL shards once, unconditionally —
-		// search index and STIX both consume them. Loading is fast (~5 s
-		// per module); the expensive work is the per-incident STIX
-		// validation downstream, which we gate separately.
-		incidentsDir := filepath.Join(modCfg.OutputDir, "incidents")
-		modIncidents, err := loadModuleIncidentsFromShards(modName, incidentsDir)
-		if err != nil {
-			log.Printf("[generate][%s] load incidents: %v", modName, err)
-		}
-		allModuleIncidents[modName] = modIncidents
 
 		// IOC-native backends (YARA etc.) generate from incident JSON, not Sigma.
 		// Activated when --backends all or when "yara" is explicitly named.
@@ -726,6 +753,23 @@ func backfillDetectionRules(
 		total += len(inc.DetectionRules)
 	}
 	log.Printf("[generate][%s] detection_rules: %d rule refs across %d incidents", modName, total, len(incidents))
+}
+
+// extractIncidentID returns the incident ID from the "Incident: <id>" line
+// embedded in a sigma rule's description by the sigma generator, or "" if
+// the tag is absent. Matches the same convention used by doctor's rules-ref check.
+func extractIncidentID(data []byte) string {
+	const tag = "Incident: "
+	idx := strings.Index(string(data), tag)
+	if idx < 0 {
+		return ""
+	}
+	rest := string(data)[idx+len(tag):]
+	end := strings.IndexAny(rest, " \t\n\r")
+	if end < 0 {
+		end = len(rest)
+	}
+	return strings.TrimSpace(rest[:end])
 }
 
 func sanitizeFilename(id string) string {

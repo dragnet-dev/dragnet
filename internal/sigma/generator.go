@@ -779,8 +779,13 @@ func (g *Generator) generateRansomware(inc *incident.Incident, base TemplateData
 }
 
 // generateContainer writes container-module Sigma rules for vulnerable and EOL images.
+// Only emits rules for high-signal CVEs (CVSS >= 7.0) or actively exploited
+// ones — low-severity container advisories don't need Sigma coverage.
 func (g *Generator) generateContainer(inc *incident.Incident, base TemplateData) error {
 	ext := inc.ContainerExt
+	if ext.CVSS < 7.0 && !ext.ExploitedInWild {
+		return nil
+	}
 	subdir := "container/" + base.Year
 	base.ContainerCVSS = ext.CVSS
 	base.ContainerTier = ext.Tier
@@ -855,8 +860,11 @@ func (g *Generator) generateCVE(inc *incident.Incident, base TemplateData) error
 		}
 	}
 
-	// Web shell and post-exploit rules are always generated for CVE incidents
-	if ext.CVEID != "" {
+	// Web shell and post-exploit rules: only emit for high-signal CVEs.
+	// Generic post-exploit templates on every CVE bloat the rule set with
+	// low-value detections (CVSS 4 info-disclosure CVEs don't need web-shell
+	// rules). Gate on CVSS >= 9 or actively exploited in the wild.
+	if ext.CVEID != "" && (ext.CVSSScore >= 9.0 || ext.ExploitedInWild) {
 		for _, rule := range []struct {
 			tmpl    string
 			subtype string

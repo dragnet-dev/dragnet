@@ -20,7 +20,7 @@ type crtshEntry struct {
 // domain from crt.sh. Returns nil slices on any error.
 // maxRelated caps the number of related domains to avoid wildcard cert noise.
 func enrichDomainCRTSh(ctx context.Context, client *http.Client, domain string, maxRelated int) (related, issuers []string) {
-	defer func() { time.Sleep(time.Second) }()
+	defer func() { time.Sleep(250 * time.Millisecond) }()
 
 	url := fmt.Sprintf("%s/?q=%s&output=json", crtshBase, domain)
 	body, err := getJSON(ctx, client, url)
