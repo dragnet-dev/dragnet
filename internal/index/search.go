@@ -118,8 +118,20 @@ func projectToSearch(module string, inc *incident.Incident) SearchRecord {
 	if inc.MalwareExt != nil && inc.MalwareExt.MalwareFamily != "" {
 		rec.Tags = append(rec.Tags, "malware:"+strings.ToLower(inc.MalwareExt.MalwareFamily))
 	}
-	if inc.RansomwareExt != nil && inc.RansomwareExt.RansomwareGroup != "" {
-		rec.Tags = append(rec.Tags, "ransomware:"+strings.ToLower(inc.RansomwareExt.RansomwareGroup))
+	if inc.RansomwareExt != nil {
+		if inc.RansomwareExt.RansomwareGroup != "" {
+			rec.Tags = append(rec.Tags, "ransomware:"+strings.ToLower(inc.RansomwareExt.RansomwareGroup))
+		}
+		for _, c := range inc.RansomwareExt.TargetedCountries {
+			if c != "" {
+				rec.Tags = append(rec.Tags, "country:"+strings.ToLower(c))
+			}
+		}
+		for _, s := range inc.RansomwareExt.TargetedSectors {
+			if s != "" {
+				rec.Tags = append(rec.Tags, "sector:"+strings.ToLower(s))
+			}
+		}
 	}
 	if inc.CVEExt != nil && inc.CVEExt.CVEID != "" {
 		rec.CVEIDs = append(rec.CVEIDs, inc.CVEExt.CVEID)

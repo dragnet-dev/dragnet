@@ -192,6 +192,7 @@ func victimsToIncidents(victims []victim, since time.Time) []*incident.Incident 
 			RansomwareExt: &incident.RansomwareExtension{
 				RansomwareGroup:   v.Group,
 				TargetedCountries: countryList(v.Country),
+				TargetedSectors:   sectorList(v.Activity),
 			},
 		}
 		if v.URL != "" {
@@ -261,6 +262,14 @@ func slugify(s string) string {
 }
 
 func countryList(s string) []string {
+	if s == "" {
+		return nil
+	}
+	return []string{s}
+}
+
+func sectorList(s string) []string {
+	s = flattenWS(s)
 	if s == "" {
 		return nil
 	}

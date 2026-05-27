@@ -225,7 +225,10 @@ func (g *Generator) Generate(inc *incident.Incident) error {
 			return err
 		}
 	}
-	if inc.RansomwareExt != nil {
+	// Ransomware module data is victim notification only (company claims from
+	// ransomware_live). Generic TTP templates applied per-victim produce tens
+	// of thousands of near-identical rules with zero detection lift. Skip.
+	if inc.RansomwareExt != nil && g.Module != "ransomware" {
 		if err := g.generateRansomware(inc, base); err != nil {
 			return err
 		}
