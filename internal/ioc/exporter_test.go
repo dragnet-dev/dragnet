@@ -96,3 +96,89 @@ func TestExportDedup(t *testing.T) {
 		t.Errorf("domain appears %d times, want 1 (dedup failed)", count)
 	}
 }
+
+func TestExportScrubsStaleDomainFeedEntries(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "domains.txt"), []byte(strings.Join([]string{
+		"Object.assign",
+		"Rar.exe",
+		"config.json",
+		"github.com",
+		"raw.githubusercontent",
+		"old.evil.example",
+	}, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	inc := &incident.Incident{
+		ID: "malware-2026-001",
+		Indicators: incident.Indicators{
+			Domains: []incident.IndicatorValue{{Value: "new-bad.example.net"}},
+		},
+	}
+	if err := New().Export(inc, dir); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, "domains.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(data)
+	for _, bad := range []string{"Object.assign", "Rar.exe", "config.json", "github.com", "raw.githubusercontent", "old.evil.example"} {
+		if strings.Contains(got, bad) {
+			t.Fatalf("domains.txt still contains stale invalid domain %q:\n%s", bad, got)
+		}
+	}
+	if !strings.Contains(got, "new-bad.example.net") {
+		t.Fatalf("domains.txt missing new valid domain:\n%s", got)
+	}
+}
+
+func TestExportScrubsStaleUnifiedDomainEntries(t *testing.T) {
+	dir := t.TempDir()
+	stale := []UnifiedEntry{
+		{Type: "domain", Value: "Object.assign", IncidentID: "old-1"},
+		{Type: "domain", Value: "github.com", IncidentID: "old-2"},
+		{Type: "domain", Value: "raw.githubusercontent", IncidentID: "old-3"},
+		{Type: "domain", Value: "valid.example.net", IncidentID: "old-4"},
+	}
+	data, err := json.Marshal(stale)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "unified.json"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	inc := &incident.Incident{
+		ID: "malware-2026-002",
+		Indicators: incident.Indicators{
+			Domains: []incident.IndicatorValue{{Value: "fresh.example.net"}},
+		},
+	}
+	if err := New().Export(inc, dir); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err = os.ReadFile(filepath.Join(dir, "unified.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var entries []UnifiedEntry
+	if err := json.Unmarshal(data, &entries); err != nil {
+		t.Fatal(err)
+	}
+	values := map[string]bool{}
+	for _, entry := range entries {
+		values[entry.Value] = true
+	}
+	for _, bad := range []string{"Object.assign", "github.com", "raw.githubusercontent"} {
+		if values[bad] {
+			t.Fatalf("unified.json still contains stale invalid domain %q", bad)
+		}
+	}
+	if !values["valid.example.net"] || !values["fresh.example.net"] {
+		t.Fatalf("unified.json did not keep valid domains: %#v", values)
+	}
+}

@@ -27,12 +27,12 @@ const (
 
 // osvEcoName maps our internal ecosystem names to OSV ecosystem names.
 var osvEcoName = map[string]string{
-	"npm":       "npm",
-	"pypi":      "PyPI",
-	"cargo":     "crates.io",
-	"maven":     "Maven",
-	"nuget":     "NuGet",
-	"rubygems":  "RubyGems",
+	"npm":            "npm",
+	"pypi":           "PyPI",
+	"cargo":          "crates.io",
+	"maven":          "Maven",
+	"nuget":          "NuGet",
+	"rubygems":       "RubyGems",
 	"go":             "Go",
 	"hex":            "Hex",
 	"packagist":      "Packagist",
@@ -47,12 +47,12 @@ var osvEcoName = map[string]string{
 
 // localEcoName maps OSV ecosystem names back to our internal names.
 var localEcoName = map[string]string{
-	"npm":       "npm",
-	"PyPI":      "pypi",
-	"crates.io": "cargo",
-	"Maven":     "maven",
-	"NuGet":     "nuget",
-	"RubyGems":  "rubygems",
+	"npm":            "npm",
+	"PyPI":           "pypi",
+	"crates.io":      "cargo",
+	"Maven":          "maven",
+	"NuGet":          "nuget",
+	"RubyGems":       "rubygems",
 	"Go":             "go",
 	"Hex":            "hex",
 	"Packagist":      "packagist",
@@ -340,6 +340,9 @@ type osvAdvisory struct {
 		Type  string `json:"type"`
 		Score string `json:"score"`
 	} `json:"severity"`
+	DatabaseSpecific struct {
+		Severity string `json:"severity"`
+	} `json:"database_specific"`
 	References []struct {
 		Type string `json:"type"`
 		URL  string `json:"url"`
@@ -353,15 +356,13 @@ func osvToIncident(adv *osvAdvisory) *incident.Incident {
 	}
 
 	// Derive primary ecosystem from the first affected entry.
-	primaryEco := localEcoName[adv.Affected[0].Package.Ecosystem]
-	if primaryEco == "" {
-		primaryEco = strings.ToLower(adv.Affected[0].Package.Ecosystem)
-	}
+	primaryEco := localEcosystemName(adv.Affected[0].Package.Ecosystem)
 
 	inc := &incident.Incident{
 		ID:          primaryEco + "-osv-" + adv.ID,
+		Source:      "osv",
 		OSVID:       adv.ID,
-		Description: adv.Summary,
+		Description: osvDescription(adv),
 		AttackType:  "malicious_publish",
 		Severity:    osvSeverity(adv),
 	}
@@ -374,11 +375,16 @@ func osvToIncident(adv *osvAdvisory) *incident.Incident {
 		}
 	}
 
-	// Packages
+	// Packages — skip entries with no name (e.g. GIT/GitHub ecosystem rows that
+	// OSV includes alongside the real Hex/Go/etc. entry) or with an ecosystem we
+	// can't map to a supported package manager.
 	for _, a := range adv.Affected {
-		eco := localEcoName[a.Package.Ecosystem]
+		if a.Package.Name == "" {
+			continue
+		}
+		eco := localEcosystemName(a.Package.Ecosystem)
 		if eco == "" {
-			eco = strings.ToLower(a.Package.Ecosystem)
+			continue
 		}
 		inc.Packages = append(inc.Packages, incident.Package{
 			Name:             a.Package.Name,
@@ -393,8 +399,33 @@ func osvToIncident(adv *osvAdvisory) *incident.Incident {
 			inc.References = append(inc.References, ref.URL)
 		}
 	}
+	if len(inc.References) == 0 {
+		inc.References = append(inc.References, "https://osv.dev/vulnerability/"+adv.ID)
+	}
 
 	return inc
+}
+
+func localEcosystemName(osvName string) string {
+	if eco := localEcoName[osvName]; eco != "" {
+		return eco
+	}
+	if base, _, ok := strings.Cut(osvName, ":"); ok {
+		if eco := localEcoName[base]; eco != "" {
+			return eco
+		}
+	}
+	return strings.ToLower(osvName)
+}
+
+func osvDescription(adv *osvAdvisory) string {
+	if summary := strings.TrimSpace(adv.Summary); summary != "" {
+		return summary
+	}
+	if details := strings.TrimSpace(adv.Details); details != "" {
+		return details
+	}
+	return "OSV advisory " + adv.ID
 }
 
 // osvSeverity derives a severity string from a CVSS score in an OSV advisory.
@@ -413,6 +444,16 @@ func osvSeverity(adv *osvAdvisory) string {
 				return "low"
 			}
 		}
+	}
+	switch strings.ToUpper(strings.TrimSpace(adv.DatabaseSpecific.Severity)) {
+	case "CRITICAL":
+		return "critical"
+	case "HIGH":
+		return "high"
+	case "MODERATE", "MEDIUM":
+		return "medium"
+	case "LOW":
+		return "low"
 	}
 	return "low"
 }

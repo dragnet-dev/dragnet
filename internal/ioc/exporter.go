@@ -11,6 +11,7 @@ import (
 
 	"github.com/dragnet-dev/dragnet/internal/deconflict"
 	"github.com/dragnet-dev/dragnet/internal/incident"
+	"golang.org/x/net/publicsuffix"
 )
 
 // isPublicIP returns true when s is a syntactically valid IPv4 or IPv6 address
@@ -30,6 +31,9 @@ func isPublicIP(s string) bool {
 // `-IP142.11.206.73C2`, `07d889e2…c766Domainsfrclak.comC2`. None of those
 // have a clean lowercase-letter TLD.
 func isLikelyDomain(s string) bool {
+	if s != strings.ToLower(s) {
+		return false
+	}
 	if net.ParseIP(s) != nil {
 		return false
 	}
@@ -46,6 +50,9 @@ func isLikelyDomain(s string) bool {
 		}
 	}
 	if deconflict.Domain(s) {
+		return false
+	}
+	if _, err := publicsuffix.EffectiveTLDPlusOne(s); err != nil {
 		return false
 	}
 	return true
@@ -74,7 +81,7 @@ func (e *Exporter) Export(inc *incident.Incident, dir string) error {
 			domains = append(domains, d.Value)
 		}
 	}
-	if err := appendLines(filepath.Join(dir, "domains.txt"), domains); err != nil {
+	if err := appendDomainLines(filepath.Join(dir, "domains.txt"), domains); err != nil {
 		return fmt.Errorf("domains.txt: %w", err)
 	}
 
@@ -90,7 +97,7 @@ func (e *Exporter) Export(inc *incident.Incident, dir string) error {
 			ips = append(ips, ip)
 		}
 	}
-	if err := appendLines(filepath.Join(dir, "ips.txt"), ips); err != nil {
+	if err := appendIPLines(filepath.Join(dir, "ips.txt"), ips); err != nil {
 		return fmt.Errorf("ips.txt: %w", err)
 	}
 
@@ -202,6 +209,36 @@ func appendLines(path string, newLines []string) error {
 	return os.WriteFile(path, []byte(strings.Join(merged, "\n")+"\n"), 0o644)
 }
 
+func appendDomainLines(path string, newLines []string) error {
+	return appendFilteredLines(path, newLines, isLikelyDomain)
+}
+
+func appendIPLines(path string, newLines []string) error {
+	return appendFilteredLines(path, newLines, isPublicIP)
+}
+
+func appendFilteredLines(path string, newLines []string, keep func(string) bool) error {
+	existing := readLines(path)
+	if len(existing) == 0 && len(newLines) == 0 {
+		return nil
+	}
+	var filtered []string
+	for _, line := range append(existing, newLines...) {
+		if keep(line) {
+			filtered = append(filtered, line)
+		}
+	}
+	merged := dedup(filtered)
+	sort.Strings(merged)
+	if len(merged) == 0 {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return nil
+	}
+	return os.WriteFile(path, []byte(strings.Join(merged, "\n")+"\n"), 0o644)
+}
+
 func readLines(path string) []string {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -274,6 +311,9 @@ func ExportCombined(modules map[string]string, destDir string) error {
 			return fmt.Errorf("parse %s unified.json: %w", module, err)
 		}
 		for _, e := range entries {
+			if !isValidUnifiedEntry(e) {
+				continue
+			}
 			key := e.Type + "|" + e.Value
 			ce, ok := combined[key]
 			if !ok {
@@ -305,10 +345,10 @@ func ExportCombined(modules map[string]string, destDir string) error {
 		}
 	}
 
-	if err := appendLines(filepath.Join(destDir, "domains.txt"), domains); err != nil {
+	if err := appendDomainLines(filepath.Join(destDir, "domains.txt"), domains); err != nil {
 		return fmt.Errorf("combined domains.txt: %w", err)
 	}
-	if err := appendLines(filepath.Join(destDir, "ips.txt"), ips); err != nil {
+	if err := appendIPLines(filepath.Join(destDir, "ips.txt"), ips); err != nil {
 		return fmt.Errorf("combined ips.txt: %w", err)
 	}
 	if err := appendLines(filepath.Join(destDir, "sha256.txt"), sha256s); err != nil {
@@ -364,6 +404,7 @@ func appendUnified(path string, inc *incident.Incident) error {
 	if data, err := os.ReadFile(path); err == nil {
 		_ = json.Unmarshal(data, &entries)
 	}
+	entries = filterUnifiedEntries(entries)
 
 	seen := map[string]bool{}
 	for _, e := range entries {
@@ -391,7 +432,9 @@ func appendUnified(path string, inc *incident.Incident) error {
 		}
 	}
 	for _, u := range inc.Indicators.URLs {
-		add(UnifiedEntry{Type: "url", Value: u.Value, IncidentID: inc.ID, Sources: u.Sources, Confidence: u.Confidence})
+		if !deconflict.URL(u.Value) {
+			add(UnifiedEntry{Type: "url", Value: u.Value, IncidentID: inc.ID, Sources: u.Sources, Confidence: u.Confidence})
+		}
 	}
 	for _, h := range inc.Indicators.FileHashes {
 		add(UnifiedEntry{
@@ -415,6 +458,29 @@ func appendUnified(path string, inc *incident.Incident) error {
 	// Also write a stream/grep-friendly JSONL alongside unified.json so
 	// consumers don't have to parse a multi-MB JSON array to scan the feed.
 	return writeUnifiedJSONL(strings.TrimSuffix(path, ".json")+".jsonl", entries)
+}
+
+func filterUnifiedEntries(entries []UnifiedEntry) []UnifiedEntry {
+	out := entries[:0]
+	for _, entry := range entries {
+		if isValidUnifiedEntry(entry) {
+			out = append(out, entry)
+		}
+	}
+	return out
+}
+
+func isValidUnifiedEntry(entry UnifiedEntry) bool {
+	switch strings.ToLower(entry.Type) {
+	case "domain":
+		return isLikelyDomain(entry.Value)
+	case "ip":
+		return isPublicIP(entry.Value)
+	case "url":
+		return !deconflict.URL(entry.Value)
+	default:
+		return true
+	}
 }
 
 // writeUnifiedJSONL serialises one UnifiedEntry per line, sorted for
