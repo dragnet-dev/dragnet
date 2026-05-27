@@ -8,10 +8,11 @@ import (
 
 // Config is the parsed representation of dragnet.yaml.
 type Config struct {
-	Modules            map[string]ModuleConfig            `yaml:"modules"`
-	CrossEnrichment    CrossEnrichConfig                  `yaml:"cross_enrichment"`
-	OnlineEnrichment   OnlineEnrichConfig                 `yaml:"online_enrichment"`
-	MultiDomainSources map[string]MultiDomainSourceConfig `yaml:"multi_domain_sources,omitempty"`
+	Modules              map[string]ModuleConfig            `yaml:"modules"`
+	CrossEnrichment      CrossEnrichConfig                  `yaml:"cross_enrichment"`
+	OnlineEnrichment     OnlineEnrichConfig                 `yaml:"online_enrichment"`
+	ExploitIndicators    ExploitIndicatorsConfig            `yaml:"exploit_indicators"`
+	MultiDomainSources   map[string]MultiDomainSourceConfig `yaml:"multi_domain_sources,omitempty"`
 }
 
 // MultiDomainSourceConfig defines a feed that is routed to multiple modules by keyword scoring.
@@ -53,6 +54,14 @@ type OnlineEnrichConfig struct {
 	CRTSh          bool `yaml:"crtsh"`
 	CRTShMaxRelated int  `yaml:"crtsh_max_related"`
 	CacheTTLDays   int  `yaml:"cache_ttl_days"`
+}
+
+// ExploitIndicatorsConfig controls ExploitDB + Metasploit HTTP indicator enrichment.
+type ExploitIndicatorsConfig struct {
+	Enabled      bool   `yaml:"enabled"`
+	GitHubToken  string `yaml:"github_token"`
+	CacheTTLDays int    `yaml:"cache_ttl_days"`
+	RateLimitMS  int    `yaml:"rate_limit_ms"`
 }
 
 // CrossEnrichConfig controls cross-domain IOC boosting and linking.
@@ -185,6 +194,11 @@ func Default() *Config {
 			CRTSh:            true,
 			CRTShMaxRelated:  20,
 			CacheTTLDays:     30,
+		},
+		ExploitIndicators: ExploitIndicatorsConfig{
+			Enabled:      false,
+			CacheTTLDays: 30,
+			RateLimitMS:  1000,
 		},
 	}
 }

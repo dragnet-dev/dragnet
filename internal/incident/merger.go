@@ -357,8 +357,81 @@ func mergeGroup(group []*Incident) *Incident {
 	}
 
 	base.Indicators = mergeIndicators(group)
+	base.CVEExt = mergeCVEExt(group)
 
 	return &base
+}
+
+// mergeCVEExt combines CVEExtension fields from all incidents in the group.
+// Boolean flags are OR'd (any source saying true wins), CVSS keeps the highest
+// score, and HTTPIndicators are union-merged by Value.
+func mergeCVEExt(group []*Incident) *CVEExtension {
+	var base *CVEExtension
+	for _, inc := range group {
+		if inc.CVEExt != nil {
+			base = inc.CVEExt
+			break
+		}
+	}
+	if base == nil {
+		return nil
+	}
+	// Make a shallow copy so we don't mutate the original.
+	merged := *base
+	for _, inc := range group {
+		if inc.CVEExt == nil || inc.CVEExt == base {
+			continue
+		}
+		ext := inc.CVEExt
+		if ext.ExploitedInWild {
+			merged.ExploitedInWild = true
+		}
+		if ext.ExploitPublic {
+			merged.ExploitPublic = true
+		}
+		if ext.PatchAvailable {
+			merged.PatchAvailable = true
+		}
+		if ext.CVSSScore > merged.CVSSScore {
+			merged.CVSSScore = ext.CVSSScore
+			merged.CVSSVector = ext.CVSSVector
+		}
+		if merged.ExploitType == "" && ext.ExploitType != "" {
+			merged.ExploitType = ext.ExploitType
+		}
+		if merged.PatchURL == "" && ext.PatchURL != "" {
+			merged.PatchURL = ext.PatchURL
+		}
+		merged.AffectedSoftware = unionAffectedSoftware(merged.AffectedSoftware, ext.AffectedSoftware)
+		merged.HTTPIndicators = unionHTTPIndicators(merged.HTTPIndicators, ext.HTTPIndicators)
+	}
+	return &merged
+}
+
+func unionHTTPIndicators(a, b []HTTPIndicator) []HTTPIndicator {
+	seen := map[string]bool{}
+	out := make([]HTTPIndicator, 0, len(a)+len(b))
+	for _, h := range append(a, b...) {
+		key := h.Type + "|" + h.Value
+		if !seen[key] {
+			seen[key] = true
+			out = append(out, h)
+		}
+	}
+	return out
+}
+
+func unionAffectedSoftware(a, b []AffectedSoftware) []AffectedSoftware {
+	seen := map[string]bool{}
+	out := make([]AffectedSoftware, 0, len(a)+len(b))
+	for _, s := range append(a, b...) {
+		key := strings.ToLower(s.Vendor + "|" + s.Product)
+		if !seen[key] {
+			seen[key] = true
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 func unionPackages(group []*Incident) []Package {

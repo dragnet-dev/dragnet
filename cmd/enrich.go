@@ -9,6 +9,7 @@ import (
 
 	"github.com/dragnet-dev/dragnet/internal/config"
 	"github.com/dragnet-dev/dragnet/internal/enrichment"
+	"github.com/dragnet-dev/dragnet/internal/enrichment/exploitdb"
 	onlineenrich "github.com/dragnet-dev/dragnet/internal/enrichment/online"
 	"github.com/dragnet-dev/dragnet/internal/incident"
 	"github.com/dragnet-dev/dragnet/internal/index"
@@ -24,9 +25,11 @@ var enrichCmd = &cobra.Command{
 }
 
 var (
-	enrichCrossDomain bool
-	enrichOnline      bool
-	enrichCacheFile   string
+	enrichCrossDomain       bool
+	enrichOnline            bool
+	enrichCacheFile         string
+	enrichExploitIndicators bool
+	enrichExploitCacheFile  string
 )
 
 func init() {
@@ -36,11 +39,15 @@ func init() {
 		"Enrich IP/domain IOCs via RIPEstat, Shodan InternetDB, and crt.sh")
 	enrichCmd.Flags().StringVar(&enrichCacheFile, "cache-file", "state/enrichment-cache.json",
 		"Path to the online enrichment cache file")
+	enrichCmd.Flags().BoolVar(&enrichExploitIndicators, "exploit-indicators", false,
+		"Enrich CVE incidents with HTTP indicators from ExploitDB and Metasploit")
+	enrichCmd.Flags().StringVar(&enrichExploitCacheFile, "exploit-cache-file", "state/exploit-indicators-cache.json",
+		"Path to the ExploitDB/Metasploit indicator cache file")
 }
 
 func runEnrich(_ *cobra.Command, _ []string) error {
-	if !enrichCrossDomain && !enrichOnline {
-		log.Println("[enrich] nothing to do — pass --cross-domain and/or --online")
+	if !enrichCrossDomain && !enrichOnline && !enrichExploitIndicators {
+		log.Println("[enrich] nothing to do — pass --cross-domain, --online, and/or --exploit-indicators")
 		return nil
 	}
 
@@ -93,6 +100,13 @@ func runEnrich(_ *cobra.Command, _ []string) error {
 		}
 	}
 
+	if enrichExploitIndicators {
+		enr := exploitdb.New(cfg.ExploitIndicators, enrichExploitCacheFile)
+		n := enr.EnrichCVEs(context.Background(), allModules)
+		log.Printf("[enrich] exploit-indicators: %d CVEs enriched", n)
+		enr.SaveCache()
+	}
+
 	// Persist enriched results. The bulk dataset lives in all/*.jsonl
 	// (re-written here so cross_domain_links / ip_enrichment / domain_enrichment
 	// are visible to downstream consumers); per-incident YAMLs rewritten only
@@ -122,6 +136,9 @@ func runEnrich(_ *cobra.Command, _ []string) error {
 						break
 					}
 				}
+			}
+			if enrichExploitIndicators && inc.CVEExt != nil && len(inc.CVEExt.HTTPIndicators) > 0 {
+				needsPersist = true
 			}
 			if needsPersist {
 				break
