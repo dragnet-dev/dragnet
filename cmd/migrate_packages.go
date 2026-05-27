@@ -16,9 +16,9 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 
+	"github.com/dragnet-dev/dragnet/internal/iocutil"
 	"github.com/spf13/cobra"
 )
 
@@ -43,79 +43,6 @@ func init() {
 	migratePkgsCmd.Flags().StringVar(&migratePkgsMods, "modules", "supply",
 		"Comma-separated list of modules to migrate.")
 	rootCmd.AddCommand(migratePkgsCmd)
-}
-
-// falsePositiveWords is a conservative denylist of strings that are definitely
-// not package names — English prepositions, conjunctions, articles, pronouns,
-// and a handful of HTML/prose tokens. It deliberately excludes short strings
-// that ARE real packages (pg, ws, rc, got, tar, mem, uv, ai, etc.).
-var falsePositiveWords = map[string]bool{
-	// articles / prepositions / conjunctions
-	"a": true, "an": true, "the": true, "of": true, "in": true, "on": true,
-	"at": true, "by": true, "to": true, "or": true, "if": true, "as": true,
-	"up": true, "no": true, "so": true, "and": true, "but": true, "nor": true,
-	"for": true, "yet": true, "via": true, "per": true, "vs": true,
-	// pronouns
-	"i": true, "me": true, "my": true, "we": true, "us": true, "our": true,
-	"he": true, "his": true, "him": true, "she": true, "her": true,
-	"it": true, "its": true, "they": true, "them": true, "their": true,
-	"you": true, "your": true, "who": true, "whom": true, "that": true,
-	"this": true, "these": true, "those": true, "which": true,
-	// common verbs / adverbs that appear in prose near install commands
-	"is": true, "are": true, "was": true, "were": true, "be": true,
-	"been": true, "being": true, "have": true, "has": true, "had": true,
-	"do": true, "does": true, "did": true, "will": true, "would": true,
-	"can": true, "could": true, "may": true, "might": true, "shall": true,
-	"should": true, "must": true, "not": true, "now": true, "then": true,
-	"also": true, "just": true, "only": true, "even": true, "both": true,
-	"each": true, "more": true, "most": true, "than": true, "when": true,
-	"with": true, "from": true, "into": true, "onto": true, "upon": true,
-	"after": true, "again": true, "still": true, "about": true, "above": true,
-	"below": true, "under": true, "over": true, "back": true, "such": true,
-	"well": true, "very": true, "here": true, "there": true, "where": true,
-	// misc prose / HTML tokens
-	"null": true, "true": true, "false": true, "none": true,
-	"div": true, "span": true, "href": true, "http": true, "https": true,
-	"id": true, "class": true, "style": true, "type": true,
-	"all": true, "any": true, "one": true, "two": true, "new": true,
-	"old": true, "out": true, "off": true, "own": true, "how": true,
-	"see": true, "try": true, "let": true, "run": true, "use": true,
-	"set": true, "get": true, "put": true, "add": true,
-}
-
-// reTrailingPunct matches names that end with a punctuation character that
-// no real package manager permits at the end of a name (. , ; ! ?).
-// This catches "owners." where the parser consumed the trailing sentence dot.
-// NB: hyphens, underscores, and brackets ARE used by real malicious packages
-// (SEO-spam npm, Cyrillic typosquats) so we deliberately don't reject them.
-var reTrailingPunct = regexp.MustCompile(`[.,;!?]$`)
-
-// reSpaces matches names containing a whitespace character — prose fragments.
-var reSpaces = regexp.MustCompile(`\s`)
-
-// isFalsePkgName returns true when name is a parser false positive.
-// Conservative by design: only removes names that CANNOT be a real package:
-//   - empty strings
-//   - names ending with sentence-terminating punctuation ("owners.")
-//   - names containing whitespace (prose fragments)
-//   - names matching the English word denylist ("of", "that", "again", "id")
-//
-// Deliberately preserved: Unicode/Cyrillic names (real typosquats),
-// long hyphenated names (real SEO-spam packages), non-ASCII (real malicious).
-func isFalsePkgName(name string) bool {
-	if name == "" {
-		return true
-	}
-	if reSpaces.MatchString(name) {
-		return true
-	}
-	if reTrailingPunct.MatchString(name) {
-		return true
-	}
-	if falsePositiveWords[strings.ToLower(name)] {
-		return true
-	}
-	return false
 }
 
 func runMigratePackages(_ *cobra.Command, _ []string) error {
@@ -233,18 +160,14 @@ func scanShardForFalsePkgs(path, mod string) ([]pkgRemoval, error) {
 			}
 			name, _ := pm["name"].(string)
 			eco, _ := pm["ecosystem"].(string)
-			if !isFalsePkgName(name) {
-				continue
-			}
-			reason := "trailing punctuation"
-			lower := strings.ToLower(name)
+			reason := ""
 			switch {
-			case name == "":
-				reason = "empty"
-			case reSpaces.MatchString(name):
-				reason = "contains whitespace"
-			case falsePositiveWords[lower]:
-				reason = "common English word"
+			case eco == "":
+				reason = "empty ecosystem"
+			case iocutil.IsFalsePkgName(name):
+				reason = "matches false positive package filter"
+			default:
+				continue
 			}
 			out = append(out, pkgRemoval{
 				incidentID: id,
@@ -297,7 +220,8 @@ func rewriteShardStripFalsePkgs(path string) (int, error) {
 				continue
 			}
 			name, _ := pm["name"].(string)
-			if isFalsePkgName(name) {
+			eco, _ := pm["ecosystem"].(string)
+			if iocutil.IsFalsePkgName(name) || eco == "" {
 				removed++
 				continue
 			}

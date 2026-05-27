@@ -15,6 +15,7 @@ package index
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -61,14 +62,6 @@ func WriteAllJSONLShards(incidents []*incident.Incident, outputDir string) error
 	// a diff every time, ballooning the commit + push.
 	sort.Slice(incidents, func(i, j int) bool { return incidents[i].ID < incidents[j].ID })
 
-	// Wipe stale shards first so a shrinking dataset doesn't leave orphans.
-	entries, _ := os.ReadDir(dir)
-	for _, e := range entries {
-		if strings.HasSuffix(e.Name(), ".jsonl") {
-			_ = os.Remove(filepath.Join(dir, e.Name()))
-		}
-	}
-
 	// Bucket by shard key, then write each bucket as one .jsonl file.
 	// Bucket-key iteration order doesn't matter — each shard is its own
 	// file and we sort the incidents inside each shard by their (already
@@ -78,56 +71,76 @@ func WriteAllJSONLShards(incidents []*incident.Incident, outputDir string) error
 		buckets[shardKey(inc.ID)] = append(buckets[shardKey(inc.ID)], inc)
 	}
 
+	// Write shards using compare-before-write; collect every filename we own
+	// so we can delete true orphans (files that existed from a prior run but
+	// no longer correspond to any bucket).
+	owned := map[string]bool{}
 	for shard, recs := range buckets {
-		// Stream into sub-shards, opening a new one when the current one
-		// crosses maxShardBytes. First sub-shard is {prefix}.jsonl; if a
-		// second one is needed we rename it to {prefix}-0.jsonl and continue
-		// with -1, -2, ...
-		if err := writeShardedJSONL(dir, shard, recs); err != nil {
+		names, err := writeShardedJSONL(dir, shard, recs)
+		if err != nil {
 			return err
+		}
+		for _, n := range names {
+			owned[n] = true
+		}
+	}
+
+	// Remove only stale shards — files present on disk but not produced this run.
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".jsonl") && !owned[e.Name()] {
+			_ = os.Remove(filepath.Join(dir, e.Name()))
 		}
 	}
 	return nil
 }
 
-// writeShardedJSONL writes recs into one or more {dir}/{shard}[-N].jsonl files,
-// rolling to the next sub-shard when the current file would exceed
-// maxShardBytes. Returns the first IO error encountered.
-func writeShardedJSONL(dir, shard string, recs []*incident.Incident) error {
+// writeShardedJSONL builds recs into one or more {dir}/{shard}[-N].jsonl
+// files in memory, writes each file only when its content differs from what
+// is already on disk, and returns the full list of filenames it owns (written
+// or unchanged). The caller uses this list to delete true orphans.
+func writeShardedJSONL(dir, shard string, recs []*incident.Incident) ([]string, error) {
 	if len(recs) == 0 {
-		return nil
+		return nil, nil
 	}
-	subIdx := 0
-	subStart := 0
-	subBytes := 0
-	flush := func(end int) error {
-		var name string
-		if subIdx == 0 && end == len(recs) {
-			name = shard + ".jsonl" // single shard, no suffix
-		} else {
-			name = fmt.Sprintf("%s-%d.jsonl", shard, subIdx)
-		}
-		path := filepath.Join(dir, name)
-		return writeJSONL(path, recs[subStart:end])
-	}
-	for i, r := range recs {
-		bytes, err := json.Marshal(r)
+
+	// Build sub-shard byte slices in memory so we can compare before writing.
+	var subShards [][]byte
+	var cur []byte
+	for _, r := range recs {
+		line, err := json.Marshal(r)
 		if err != nil {
-			return fmt.Errorf("marshal %s: %w", r.ID, err)
+			return nil, fmt.Errorf("marshal %s: %w", r.ID, err)
 		}
-		// +1 for newline. If this record would push us over the budget AND
-		// we already have at least one record in the current sub-shard, flush.
-		if subBytes > 0 && subBytes+len(bytes)+1 > maxShardBytes {
-			if err := flush(i); err != nil {
-				return err
-			}
-			subIdx++
-			subStart = i
-			subBytes = 0
+		line = append(line, '\n')
+		if len(cur) > 0 && len(cur)+len(line) > maxShardBytes {
+			subShards = append(subShards, cur)
+			cur = nil
 		}
-		subBytes += len(bytes) + 1
+		cur = append(cur, line...)
 	}
-	return flush(len(recs))
+	if len(cur) > 0 {
+		subShards = append(subShards, cur)
+	}
+
+	names := make([]string, len(subShards))
+	for i, data := range subShards {
+		var name string
+		if len(subShards) == 1 {
+			name = shard + ".jsonl"
+		} else {
+			name = fmt.Sprintf("%s-%d.jsonl", shard, i)
+		}
+		names[i] = name
+		path := filepath.Join(dir, name)
+		if existing, err := os.ReadFile(path); err == nil && bytes.Equal(existing, data) {
+			continue // identical — skip the write, don't dirty git
+		}
+		if err := os.WriteFile(path, data, 0o644); err != nil {
+			return nil, err
+		}
+	}
+	return names, nil
 }
 
 // LoadAllJSONLShards reads every {outputDir}/incidents/all/*.jsonl shard back
@@ -345,22 +358,6 @@ func WriteByPackageLookup(incidents []*incident.Incident, outputDir string) erro
 }
 
 // ─── helpers ──────────────────────────────────────────────────────────────
-
-func writeJSONL(path string, incidents []*incident.Incident) error {
-	f, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	bw := bufio.NewWriterSize(f, 1<<20)
-	enc := json.NewEncoder(bw)
-	for _, inc := range incidents {
-		if err := enc.Encode(inc); err != nil {
-			return err
-		}
-	}
-	return bw.Flush()
-}
 
 // shardKey picks the alphanumeric prefix of an incident ID, lowercased, as the
 // shard filename. The result is always a safe filename — we stop at the first
