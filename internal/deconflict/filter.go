@@ -66,7 +66,8 @@ func Domain(s string) bool {
 	s = strings.ToLower(s)
 	tld := s[strings.LastIndex(s, ".")+1:]
 	switch tld {
-	case "example", "invalid", "localhost", "local", "test":
+	case "example", "invalid", "localhost", "local", "test",
+		"internal", "corp", "lan", "home", "localdomain", "intranet":
 		return true
 	}
 
@@ -94,12 +95,13 @@ func Domain(s string) bool {
 var fileExtensions = []string{
 	".exe", ".dll", ".sys", ".drv", ".ocx", ".cpl", ".scr", // Windows PE
 	".bash", ".zsh", ".elf", ".bin", // Linux/Unix
-	".bat", ".cmd", ".ps1", ".vbs", // Scripts
-	".py", ".js", ".php", ".rb", ".java", // Source
-	".json", ".dat", // Data/config files
-	".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", // Docs
-	".tar", ".gz", ".tgz", ".rar", ".7z", // Archives
-	".jpg", ".jpeg", ".png", ".gif", ".bmp", ".svg", // Images
+	".bat", ".cmd", ".ps1", ".vbs", ".hta", // Scripts
+	".py", ".js", ".ts", ".php", ".rb", ".java", ".go", // Source
+	".json", ".dat", ".xml", ".yaml", ".yml", // Data/config files
+	".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", // Docs
+	".tar", ".gz", ".tgz", ".rar", ".7z", ".zip", ".iso", ".img", // Archives/images
+	".jpg", ".jpeg", ".png", ".gif", ".bmp", ".svg", ".ico", // Images
+	".lnk", ".inf", ".reg", ".tmp", ".log", // Windows artifacts
 }
 
 var blockedDomains = map[string]bool{
@@ -132,6 +134,23 @@ var blockedDomains = map[string]bool{
 	"ipinfo.io":        true,
 	"outlook.com":      true,
 	"zohomail.com":     true,
+	// Threat intel research tools — appear in blog references, not IOCs
+	"shodan.io":           true,
+	"censys.io":           true,
+	"any.run":             true,
+	"hybrid-analysis.com": true,
+	"app.any.run":         true,
+	"tria.ge":             true,
+	"urlscan.io":          true,
+	"browserling.com":     true,
+	// Archival / link shorteners used in references
+	"archive.org": true, "web.archive.org": true,
+	"t.co": true,
+	// Communication platforms (not C2 infra)
+	"slack.com": true, "discord.com": true,
+	// Abuse/intel feeds (our own data sources — not IOCs)
+	"abuse.ch": true, "bazaar.abuse.ch": true,
+	"urlhaus.abuse.ch": true, "feodotracker.abuse.ch": true,
 }
 
 var blockedDomainSuffixes = []string{
