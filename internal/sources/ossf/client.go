@@ -174,9 +174,17 @@ func ossfToIncident(e *ossfEntry) *incident.Incident {
 		return nil
 	}
 
+	desc := e.Summary
+	if desc == "" {
+		if len(e.Affected) > 0 && e.Affected[0].Package.Name != "" {
+			desc = "Malicious code in " + e.Affected[0].Package.Name + " (" + e.Affected[0].Package.Ecosystem + ")"
+		} else {
+			desc = "OSSF malware advisory " + e.ID
+		}
+	}
 	inc := &incident.Incident{
 		ID:          "ossf-" + strings.ToLower(strings.ReplaceAll(e.ID, "/", "-")),
-		Description: e.Summary,
+		Description: desc,
 		AttackType:  "malicious_publish",
 		Severity:    "high",
 	}

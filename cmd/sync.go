@@ -308,6 +308,12 @@ func runSync(_ *cobra.Command, _ []string) error {
 				}
 				log.Printf("[sync][%s] %s: fetched %d incidents in %s", modName, s.Name(), len(got), dur)
 				srcStats.Store(s.Name(), srcResult{count: len(got)})
+				// Stamp source name on any incident the client forgot to set it on.
+				for _, inc := range got {
+					if inc.Source == "" {
+						inc.Source = s.Name()
+					}
+				}
 				mu.Lock()
 				incidents = append(incidents, got...)
 				mu.Unlock()

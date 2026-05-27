@@ -201,7 +201,9 @@ var (
 	// PyPI: pip install <name>[==version] patterns
 	rePipInstall = regexp.MustCompile(`(?i)pip(?:3)?\s+install\s+([\w][\w.-]{1,100})(?:\s*([<>=!~^]{1,3}\s*[\w.*+!-]+(?:\s*,\s*[<>=!~^]{1,3}\s*[\w.*+!-]+)*))?`)
 	// Bare pip version constraint: name==1.0.0 or name>=2.0 in requirements files.
-	rePipVersioned = regexp.MustCompile(`\b([a-zA-Z][a-zA-Z0-9._-]{1,100})\s*([<>=!~^]{1,3}\s*[\w.*+!-]+(?:\s*,\s*[<>=!~^]{1,3}\s*[\w.*+!-]+)*)\b`)
+	// Version must start with a digit so we don't fire on JavaScript comparisons like
+	// `result>=threshold` or `req.onupgradeneeded>=value` in obfuscated blog content.
+	rePipVersioned = regexp.MustCompile(`\b([a-zA-Z][a-zA-Z0-9._-]{1,100})\s*([<>=!~^]{1,3}\s*\d[\w.*+!-]*(?:\s*,\s*[<>=!~^]{1,3}\s*\d[\w.*+!-]*)*)\b`)
 	// npm install <name>[@version] (unscoped)
 	reNPMInstall = regexp.MustCompile(`(?i)npm\s+(?:install|i|add)\s+([\w][\w.-]{0,100})(?:@([^\s"'<>,]+))?`)
 )
@@ -256,7 +258,9 @@ func ExtractPackages(htmlStr string) []AffectedPackage {
 		if version != "" && strings.HasSuffix(name, "@"+version) {
 			name = strings.TrimSuffix(name, "@"+version)
 		}
-		add("npm", name, version)
+		if !iocutil.IsFalsePkgName(name) {
+			add("npm", name, version)
+		}
 	}
 
 	for _, sub := range reNPMInstall.FindAllStringSubmatch(text, -1) {
@@ -264,7 +268,7 @@ func ExtractPackages(htmlStr string) []AffectedPackage {
 		if len(sub) > 2 {
 			version = sub[2]
 		}
-		if looksLikePackageName(name) {
+		if !iocutil.IsFalsePkgName(name) {
 			add("npm", name, version)
 		}
 	}
@@ -274,7 +278,7 @@ func ExtractPackages(htmlStr string) []AffectedPackage {
 		if len(sub) > 2 {
 			version = strings.TrimSpace(sub[2])
 		}
-		if looksLikePackageName(name) {
+		if !iocutil.IsFalsePkgName(name) {
 			add("pypi", name, version)
 		}
 	}
@@ -282,7 +286,7 @@ func ExtractPackages(htmlStr string) []AffectedPackage {
 	for _, sub := range rePipVersioned.FindAllStringSubmatch(text, -1) {
 		name, version := sub[1], strings.TrimSpace(sub[2])
 		// Only accept plausible package names — skip words that are clearly English prose.
-		if looksLikePackageName(name) {
+		if !iocutil.IsFalsePkgName(name) {
 			add("pypi", name, version)
 		}
 	}
@@ -299,65 +303,35 @@ func ExtractPackages(htmlStr string) []AffectedPackage {
 	return out
 }
 
-// commonWords is a denylist of short English words that are not package names
-// but frequently appear after "npm install" or "pip install" in prose.
-var commonWords = map[string]bool{
-	"a": true, "an": true, "the": true, "to": true, "of": true, "in": true,
-	"on": true, "at": true, "by": true, "it": true, "is": true, "as": true,
-	"or": true, "if": true, "be": true, "do": true, "no": true, "so": true,
-	"go": true, "up": true, "my": true, "we": true, "us": true, "he": true,
-	"his": true, "her": true, "its": true, "our": true, "you": true,
-	"get": true, "set": true, "run": true, "use": true, "new": true,
-	"old": true, "add": true, "all": true, "and": true, "for": true,
-	"not": true, "but": true, "out": true, "one": true, "any": true,
-	"can": true, "may": true, "has": true, "had": true, "was": true,
-	"are": true, "via": true, "try": true, "let": true, "see": true,
-	"app": true, "api": true, "web": true, "bin": true, "src": true,
-	"lib": true, "dev": true, "log": true, "cli": true, "env": true,
-	"cfg": true, "tmp": true, "var": true, "pkg": true, "mod": true,
-	"test": true, "core": true, "util": true, "base": true, "main": true,
-	"init": true, "help": true, "info": true, "data": true, "file": true,
-	"list": true, "path": true, "name": true, "type": true, "mode": true,
-	"true": true, "false": true, "none": true, "null": true,
-}
-
-// looksLikePackageName returns true for strings that plausibly name a package.
-// Requires length >= 4, rejects prose words and capitalised strings.
-func looksLikePackageName(s string) bool {
-	if len(s) < 4 || len(s) > 80 {
-		return false
-	}
-	if commonWords[strings.ToLower(s)] {
-		return false
-	}
-	for _, r := range s {
-		if r >= 'A' && r <= 'Z' {
-			return false // prose word with capital
-		}
-		if r == '_' || r == '-' || (r >= '0' && r <= '9') {
-			return true // underscore/hyphen/digit strongly suggests package name
-		}
-	}
-	return true
-}
-
 func extractGenericRegexIOCs(htmlStr, source string) []RawIOC {
 	var iocs []RawIOC
+
+	add := func(typ, val string) {
+		if clean, ok := NormalizeIOC(typ, val); ok {
+			iocs = append(iocs, RawIOC{Type: typ, Value: clean, Source: source})
+		}
+	}
+
 	for _, m := range reGenericDefangedDomain.FindAllString(htmlStr, -1) {
-		domain := strings.ReplaceAll(m, "[.]", ".")
-		iocs = append(iocs, RawIOC{Type: "domain", Value: domain, Source: source})
+		// Trim trailing sentence punctuation captured by the suffix char class.
+		undefanged := strings.TrimRight(strings.ReplaceAll(m, "[.]", "."), ".")
+		if reGenericIP.MatchString(undefanged) {
+			add("ip", undefanged)
+		} else {
+			add("domain", undefanged)
+		}
 	}
 	for _, m := range reGenericIP.FindAllString(htmlStr, -1) {
-		iocs = append(iocs, RawIOC{Type: "ip", Value: m, Source: source})
+		add("ip", m)
 	}
 	for _, m := range reGenericSHA256.FindAllString(htmlStr, -1) {
-		iocs = append(iocs, RawIOC{Type: "sha256", Value: strings.ToLower(m), Source: source})
+		add("sha256", strings.ToLower(m))
 	}
 	for _, m := range reGenericSHA1.FindAllString(htmlStr, -1) {
-		iocs = append(iocs, RawIOC{Type: "sha1", Value: strings.ToLower(m), Source: source})
+		add("sha1", strings.ToLower(m))
 	}
 	for _, m := range reGenericMD5.FindAllString(htmlStr, -1) {
-		iocs = append(iocs, RawIOC{Type: "md5", Value: strings.ToLower(m), Source: source})
+		add("md5", strings.ToLower(m))
 	}
 	return iocs
 }

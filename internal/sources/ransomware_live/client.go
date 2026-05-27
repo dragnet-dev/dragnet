@@ -195,17 +195,20 @@ func victimsToIncidents(victims []victim, since time.Time) []*incident.Incident 
 			},
 		}
 		if v.URL != "" {
-			inc.References = []string{v.URL}
-			// Also surface the leak-site URL as a URL indicator so it flows
-			// into feeds/unified.{json,jsonl} and SOAR pipelines that watch
-			// for ransomware infrastructure. Without this the ransomware
-			// module produced 0 IOCs despite every victim record carrying
-			// an actionable URL.
-			inc.Indicators.URLs = append(inc.Indicators.URLs, incident.IndicatorValue{
-				Value:      v.URL,
-				Sources:    []string{"ransomware_live"},
-				Confidence: 0.9,
-			})
+			// ransomware.live API occasionally emits single-slash URLs
+			// (e.g. "http:/host.onion/...") — fix before storing.
+			rawURL := fixSingleSlash(v.URL)
+			if strings.HasPrefix(rawURL, "http://") || strings.HasPrefix(rawURL, "https://") {
+				inc.References = []string{rawURL}
+				// Also surface the leak-site URL as a URL indicator so it flows
+				// into feeds/unified.{json,jsonl} and SOAR pipelines that watch
+				// for ransomware infrastructure.
+				inc.Indicators.URLs = append(inc.Indicators.URLs, incident.IndicatorValue{
+					Value:      rawURL,
+					Sources:    []string{"ransomware_live"},
+					Confidence: 0.9,
+				})
+			}
 		}
 		out = append(out, inc)
 	}
@@ -262,4 +265,16 @@ func countryList(s string) []string {
 		return nil
 	}
 	return []string{s}
+}
+
+// fixSingleSlash corrects "http:/host" → "http://host" from the
+// ransomware.live API which occasionally omits the second slash.
+func fixSingleSlash(u string) string {
+	if strings.HasPrefix(u, "http:/") && !strings.HasPrefix(u, "http://") {
+		return "http://" + u[6:]
+	}
+	if strings.HasPrefix(u, "https:/") && !strings.HasPrefix(u, "https://") {
+		return "https://" + u[7:]
+	}
+	return u
 }
