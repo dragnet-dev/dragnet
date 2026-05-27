@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/dragnet-dev/dragnet/internal/config"
 	"github.com/dragnet-dev/dragnet/internal/enrichment"
@@ -28,6 +29,7 @@ var (
 	enrichCrossDomain       bool
 	enrichOnline            bool
 	enrichCacheFile         string
+	enrichTimeoutMinutes    int
 	enrichExploitIndicators bool
 	enrichExploitCacheFile  string
 )
@@ -39,6 +41,8 @@ func init() {
 		"Enrich IP/domain IOCs via RIPEstat, Shodan InternetDB, and crt.sh")
 	enrichCmd.Flags().StringVar(&enrichCacheFile, "cache-file", "state/enrichment-cache.json",
 		"Path to the online enrichment cache file")
+	enrichCmd.Flags().IntVar(&enrichTimeoutMinutes, "timeout-minutes", 0,
+		"Stop online enrichment after this many minutes and save the cache (0 = no limit)")
 	enrichCmd.Flags().BoolVar(&enrichExploitIndicators, "exploit-indicators", false,
 		"Enrich CVE incidents with HTTP indicators from ExploitDB and Metasploit")
 	enrichCmd.Flags().StringVar(&enrichExploitCacheFile, "exploit-cache-file", "state/exploit-indicators-cache.json",
@@ -92,8 +96,17 @@ func runEnrich(_ *cobra.Command, _ []string) error {
 				log.Printf("[enrich] periodic cache save: ok")
 			}
 		}
+
+		ctx := context.Background()
+		if enrichTimeoutMinutes > 0 {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, time.Duration(enrichTimeoutMinutes)*time.Minute)
+			defer cancel()
+			log.Printf("[enrich] online: timeout set to %d minutes", enrichTimeoutMinutes)
+		}
+
 		enr := onlineenrich.New(cfg.OnlineEnrichment, cache)
-		n := enr.EnrichAllWithSave(context.Background(), allModules, saveFn)
+		n := enr.EnrichAllWithSave(ctx, allModules, saveFn)
 		log.Printf("[enrich] online: %d new enrichments", n)
 		if err := state.SaveEnrichmentCache(enrichCacheFile, cache); err != nil {
 			log.Printf("[enrich] save cache: %v", err)
