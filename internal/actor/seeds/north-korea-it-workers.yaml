@@ -1,0 +1,19 @@
+id: north-korea-it-workers
+name: North Korea IT Worker Network
+type: nation-state
+description: >-
+  Network of DPRK-state-directed IT workers posing as freelancers on platforms like
+  Upwork, GitHub, and LinkedIn to gain access to codebases and insert backdoors. Also
+  known as Famous Chollima (CrowdStrike) and documented in multiple CISA/FBI/Treasury
+  joint advisories. Workers generate revenue for DPRK weapons programs and exfiltrate
+  IP from victim organisations.
+aliases:
+  - north korean it workers
+  - north korea it workers
+  - dprk it workers
+  - dprk contractor
+  - dprk contractors
+  - famous chollima
+  - famous-chollima
+first_seen: "2017-01-01"
+confidence: high

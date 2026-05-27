@@ -206,13 +206,22 @@ func runSync(_ *cobra.Command, _ []string) error {
 		sigmaReg, _ = sigma.LoadRegistry("/dev/null")
 	}
 
+	// Seed supply-chain actor profiles to disk (no-op if already present).
+	// Must run before WriteProfiles so seeds persist to haul on first run.
+	if err := actor.SeedProfiles(filepath.Join(dataDir(), "actors/profiles")); err != nil {
+		log.Printf("[sync] actor seed: %v", err)
+	}
+
 	// ATT&CK actor store — fetched once, used by all modules for attribution.
 	// Falls back to on-disk profiles when the bundle hasn't changed (ETag match).
 	actorStore, newMITREETag := loadActorStore(ctx, st.MITREETag)
 	if newMITREETag != "" {
 		st.MITREETag = newMITREETag
 	}
+	// Merge embedded supply-chain seeds into the in-memory store so they
+	// participate in attribution even when MITRE returned a fresh bundle.
 	if actorStore != nil {
+		actor.ApplySeeds(actorStore)
 		stix.SetActorStore(actorStore)
 	}
 

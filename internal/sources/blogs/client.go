@@ -417,6 +417,11 @@ func iocsToDraftIncident(source, ref, title string, pubTime *time.Time, iocs []R
 			})
 		case "file_name":
 			inc.Indicators.FileNames = append(inc.Indicators.FileNames, ioc.Value)
+		case "campaign_marker":
+			if inc.Campaign.Name == "" && ioc.Value != "" {
+				inc.Campaign.Name = ioc.Value
+				inc.Campaign.Confidence = "medium"
+			}
 		}
 	}
 	return inc

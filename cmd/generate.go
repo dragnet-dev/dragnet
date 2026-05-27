@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"slices"
 	"sort"
@@ -375,6 +376,39 @@ func writeModuleSTIX(modName string, incidents []*incident.Incident, stixOutDir 
 	return nil
 }
 
+// networkOnlyBackends only produce meaningful output for network-layer Sigma
+// rules. Skip non-network files entirely to avoid writing comment-stub
+// placeholders that add noise to the satellite repos.
+var networkOnlyBackends = map[string]bool{
+	"suricata": true,
+	"snort":    true,
+}
+
+// networkCategories are the logsource categories that produce network rules.
+var networkCategories = map[string]bool{
+	"network_connection": true,
+	"dns_query":          true,
+	"network_traffic":    true,
+	"proxy":              true,
+}
+
+// reLogsourceCategory extracts the logsource.category value from a Sigma YAML
+// using a lightweight regex rather than a full parse — category is always at
+// 2-space indentation inside the logsource block in our generated files.
+var reLogsourceCategory = regexp.MustCompile(`(?m)^  category:\s*(\S+)`)
+
+func sigmaCategory(data []byte) string {
+	m := reLogsourceCategory.Find(data)
+	if m == nil {
+		return ""
+	}
+	parts := strings.SplitN(string(m), ":", 2)
+	if len(parts) != 2 {
+		return ""
+	}
+	return strings.TrimSpace(parts[1])
+}
+
 // compileBackendsParallel runs the (rule × backend) compile cartesian
 // across runtime.NumCPU() workers. Each backend's Compile() is pure — it
 // parses the Sigma YAML into the backend's native rule format — so workers
@@ -441,7 +475,14 @@ func compileBackendsParallel(modName string, sigmaFiles []string, be []backends.
 		if !ok {
 			continue
 		}
+		cat := sigmaCategory(data)
 		for _, b := range be {
+			// Network-only backends (Suricata, Snort) only produce useful output
+			// for network-layer rules. Skip non-network files to avoid writing
+			// comment-stub placeholders into the satellite repos.
+			if networkOnlyBackends[b.Name()] && !networkCategories[cat] {
+				continue
+			}
 			jobs <- job{sf: sf, data: data, backend: b}
 		}
 	}

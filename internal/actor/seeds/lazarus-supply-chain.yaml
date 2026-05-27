@@ -1,0 +1,21 @@
+id: lazarus-supply-chain
+name: Lazarus Group (Supply Chain)
+type: nation-state
+description: >-
+  DPRK-attributed threat actor (also known as Hidden Cobra, ZINC, APT38 sub-cluster)
+  conducting supply-chain attacks against open-source package ecosystems. Distinct from
+  MITRE's primary Lazarus Group profile in that this cluster focuses on malicious npm,
+  PyPI, and GitHub Actions packages rather than traditional banking/espionage operations.
+aliases:
+  - lazarus group supply chain
+  - lazarus supply chain
+  - hidden cobra supply
+  - zinc supply
+  - apt38 supply
+  - lazarus group
+  - lazarus-group
+  - hidden cobra
+  - hidden-cobra
+  - zinc
+first_seen: "2020-01-01"
+confidence: high

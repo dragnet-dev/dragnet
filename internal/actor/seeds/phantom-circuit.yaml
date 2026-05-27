@@ -1,0 +1,18 @@
+id: phantom-circuit
+name: Phantom Circuit
+type: nation-state
+description: >-
+  DPRK-linked supply-chain cluster conducting Contagious Interview / DEV#POPPER campaigns:
+  fake job interviews that lure developers into running malicious repositories under the
+  guise of a coding test. Drops infostealer and backdoor payloads via npm packages and
+  Python scripts. Attributed to North Korea by SentinelOne, Mandiant, and Recorded Future.
+aliases:
+  - phantom circuit
+  - phantom-circuit
+  - contagious interview
+  - contagious-interview
+  - dev#popper
+  - dev popper
+  - dev-popper
+first_seen: "2023-01-01"
+confidence: high

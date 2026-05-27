@@ -8,6 +8,9 @@ import (
 	"golang.org/x/net/html"
 )
 
+// reCampaign matches operation/campaign names in attribution section text.
+var reCampaign = regexp.MustCompile(`(?i)(?:campaign|operation|cluster|actor|group)\s*:?\s*([A-Z][A-Za-z0-9][A-Za-z0-9 \-]{2,38})`)
+
 var (
 	reHashLine = regexp.MustCompile(`(?i)^-\s+(SHA256|SHA1|MD5)\s+([a-f0-9]+)$`)
 	reIP       = regexp.MustCompile(`\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b`)
@@ -90,6 +93,42 @@ func (p *Parser) ParseIOCs(htmlStr string) ([]blogs.RawIOC, []blogs.AffectedPack
 				for _, pkg := range blogs.ExtractPackages(textContent(sib)) {
 					addIOC(blogs.RawIOC{Type: "package_" + pkg.Ecosystem, Value: pkg.Name, Source: p.Name()})
 				}
+			}
+		}
+	}
+
+	// Look for "Attribution" or "Threat Actor" H2 section and extract campaign name.
+	var attrH2 *html.Node
+	var findAttrH2 func(*html.Node)
+	findAttrH2 = func(n *html.Node) {
+		if attrH2 != nil {
+			return
+		}
+		if n.Type == html.ElementNode && n.Data == "h2" {
+			txt := strings.ToLower(strings.TrimSpace(textContent(n)))
+			if strings.Contains(txt, "attribution") || strings.Contains(txt, "threat actor") {
+				attrH2 = n
+				return
+			}
+		}
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			findAttrH2(c)
+		}
+	}
+	findAttrH2(doc)
+	if attrH2 != nil {
+		var parts []string
+		for sib := attrH2.NextSibling; sib != nil; sib = sib.NextSibling {
+			if sib.Type == html.ElementNode && sib.Data == "h2" {
+				break
+			}
+			parts = append(parts, textContent(sib))
+		}
+		sectionText := strings.Join(parts, " ")
+		if m := reCampaign.FindStringSubmatch(sectionText); m != nil {
+			name := strings.TrimSpace(m[1])
+			if name != "" {
+				addIOC(blogs.RawIOC{Type: "campaign_marker", Value: name, Source: p.Name()})
 			}
 		}
 	}

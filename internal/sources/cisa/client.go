@@ -15,6 +15,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -93,6 +94,62 @@ type cisaVuln struct {
 	Notes                      string `json:"notes"`
 }
 
+// cveActorMap maps well-documented CVEs to Dragnet actor slugs.
+// Only entries with clear public attribution from CISA/FBI/NSA joint advisories.
+var cveActorMap = map[string]string{
+	"CVE-2021-44228": "lazarus-supply-chain", // Log4Shell — Lazarus/APT41 exploitation
+	"CVE-2023-34362": "cl0p",                 // MOVEit Transfer — Cl0p ransomware
+	"CVE-2023-4966":  "lockbit",              // Citrix Bleed — LockBit 3.0
+	"CVE-2024-3400":  "unc2630",              // PAN-OS — UNC2630 (Volt Typhoon adjacent)
+	"CVE-2021-26084": "hafnium",              // Confluence — Hafnium / multiple APTs
+	"CVE-2022-1388":  "apt41",               // F5 BIG-IP — APT41
+	"CVE-2023-27350": "cl0p",                // PaperCut — Cl0p and LockBit
+	"CVE-2023-44487": "apt41",               // HTTP/2 Rapid Reset — multiple state actors
+	"CVE-2024-21762": "volt-typhoon",        // Fortinet — Volt Typhoon
+	"CVE-2024-55591": "volt-typhoon",        // Fortinet auth bypass — Volt Typhoon
+	"CVE-2021-40444": "apt28",              // MSHTML — APT28 / multiple actors
+	"CVE-2024-23917": "apt29",              // JetBrains TeamCity — APT29 (Midnight Blizzard)
+	"CVE-2023-42793": "apt29",              // JetBrains TeamCity — APT29
+}
+
+// cisaActorPatterns maps known actor names found in CISA Notes/description to
+// Dragnet actor slugs. Checked case-insensitively against Notes and description.
+var cisaActorPatterns = []struct{ pattern, actor string }{
+	{"jade sleet", "jade-sleet"},
+	{"tradertraitor", "jade-sleet"},
+	{"ruby sleet", "jade-sleet"},
+	{"lazarus group", "lazarus-supply-chain"},
+	{"hidden cobra", "lazarus-supply-chain"},
+	{"contagious interview", "phantom-circuit"},
+	{"dev#popper", "phantom-circuit"},
+	{"dev popper", "phantom-circuit"},
+	{"north korean it worker", "north-korea-it-workers"},
+	{"dprk it worker", "north-korea-it-workers"},
+	{"famous chollima", "north-korea-it-workers"},
+	{"volt typhoon", "volt-typhoon"},
+	{"saltyphoon", "salt-typhoon"},
+	{"salt typhoon", "salt-typhoon"},
+	{"apt29", "apt29"},
+	{"midnight blizzard", "apt29"},
+	{"cozy bear", "apt29"},
+	{"apt28", "apt28"},
+	{"fancy bear", "apt28"},
+	{"forest blizzard", "apt28"},
+	{"apt41", "apt41"},
+	{"hafnium", "hafnium"},
+	{"cl0p", "cl0p"},
+	{"clop ransomware", "cl0p"},
+	{"lockbit", "lockbit"},
+}
+
+// reKEVActor extracts a specific group name from KnownRansomwareCampaignUse
+// when the field contains an actor name rather than just "Known"/"Unknown".
+var reKEVActor = regexp.MustCompile(`(?i)^\s*(known|unknown)\s*$`)
+
+func normalizeCampaignName(s string) string {
+	return strings.ToLower(strings.TrimSpace(s))
+}
+
 func cisaVulnToIncident(v *cisaVuln) *incident.Incident {
 	if v.CVEID == "" {
 		return nil
@@ -117,6 +174,33 @@ func cisaVulnToIncident(v *cisaVuln) *incident.Incident {
 			"https://www.cisa.gov/known-exploited-vulnerabilities-catalog",
 			"https://nvd.nist.gov/vuln/detail/" + v.CVEID,
 		},
+	}
+
+	// Actor attribution via CVE→actor lookup table (well-documented post-attribution).
+	if slug, ok := cveActorMap[v.CVEID]; ok {
+		inc.Campaign.Actor = slug
+		inc.Campaign.Confidence = "high"
+	}
+
+	// Attribution via KnownRansomwareCampaignUse: if the field contains a
+	// specific group name (not just "Known"/"Unknown"), use it.
+	if kru := strings.TrimSpace(v.KnownRansomwareCampaignUse); kru != "" && !reKEVActor.MatchString(kru) {
+		if inc.Campaign.Actor == "" {
+			inc.Campaign.Actor = normalizeCampaignName(kru)
+			inc.Campaign.Confidence = "medium"
+		}
+	}
+
+	// Scan Notes field for known actor name patterns.
+	if inc.Campaign.Actor == "" && v.Notes != "" {
+		notesLower := strings.ToLower(v.Notes)
+		for _, pat := range cisaActorPatterns {
+			if strings.Contains(notesLower, pat.pattern) {
+				inc.Campaign.Actor = pat.actor
+				inc.Campaign.Confidence = "medium"
+				break
+			}
+		}
 	}
 
 	// We deliberately do NOT attempt to map (vendor, product) onto a package

@@ -1,0 +1,19 @@
+id: jade-sleet
+name: Jade Sleet
+type: nation-state
+description: >-
+  North Korean threat actor responsible for supply-chain and social engineering attacks
+  targeting cryptocurrency developers and blockchain firms. Operates via fake npm/PyPI
+  packages and typosquatted libraries. Known as TraderTraitor by CISA/FBI, and Ruby Sleet
+  by Microsoft. Part of the broader Lazarus constellation attributed to DPRK's RGB.
+aliases:
+  - jade sleet
+  - jade-sleet
+  - taedonggang
+  - tradertraitor
+  - trader traitor
+  - ruby sleet
+  - ruby-sleet
+  - unc4899
+first_seen: "2022-01-01"
+confidence: high
