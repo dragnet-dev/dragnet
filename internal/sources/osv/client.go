@@ -367,6 +367,13 @@ func osvToIncident(adv *osvAdvisory) *incident.Incident {
 		Severity:    osvSeverity(adv),
 	}
 
+	// Published timestamp — drives the 90-day curation window in index.json.
+	if !adv.Published.IsZero() {
+		inc.CompromiseWindow.Start = adv.Published.UTC().Format(time.RFC3339)
+	} else if !adv.Modified.IsZero() {
+		inc.CompromiseWindow.Start = adv.Modified.UTC().Format(time.RFC3339)
+	}
+
 	// GHSA alias
 	for _, alias := range adv.Aliases {
 		if strings.HasPrefix(alias, "GHSA-") {

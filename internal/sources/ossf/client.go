@@ -188,6 +188,11 @@ func ossfToIncident(e *ossfEntry) *incident.Incident {
 		AttackType:  "malicious_publish",
 		Severity:    "high",
 	}
+	if !e.Published.IsZero() {
+		inc.CompromiseWindow.Start = e.Published.UTC().Format(time.RFC3339)
+	} else if !e.Modified.IsZero() {
+		inc.CompromiseWindow.Start = e.Modified.UTC().Format(time.RFC3339)
+	}
 
 	for _, ref := range e.References {
 		inc.References = append(inc.References, ref.URL)

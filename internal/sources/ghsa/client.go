@@ -102,6 +102,9 @@ func ghsaToIncident(a *ghsaAdvisory) *incident.Incident {
 		Severity:    normaliseSeverity(a.Severity),
 		References:  a.References,
 	}
+	if !a.PublishedAt.IsZero() {
+		inc.CompromiseWindow.Start = a.PublishedAt.UTC().Format(time.RFC3339)
+	}
 
 	for _, v := range a.Vulnerabilities {
 		pkg := incident.Package{
