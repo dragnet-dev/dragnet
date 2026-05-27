@@ -292,6 +292,68 @@ func TestGenerate_SkipsEmptyLayers(t *testing.T) {
 	}
 }
 
+func TestGenerate_SkipsNetworkIOCWhenAllFiltered(t *testing.T) {
+	outDir := t.TempDir()
+	gen := New(outDir, "test", nil)
+
+	// All indicators are false positives: github.com is deconflicted; 10.0.0.1 is RFC-1918.
+	// hasHighConfidenceIOC passes (confidence >= 0.60), but normalizeIOCValue rejects both.
+	inc := &incident.Incident{
+		ID:               "DRAG-FILTERED-NET-001",
+		Severity:         "high",
+		Description:      "All network IOCs are false positives.",
+		CompromiseWindow: incident.CompromiseWindow{Start: "2026-01-01T00:00:00Z"},
+		Indicators: incident.Indicators{
+			Domains: []incident.IndicatorValue{
+				{Value: "github.com", Confidence: 0.90},
+			},
+			IPs: []incident.IndicatorValue{
+				{Value: "10.0.0.1", Confidence: 0.90},
+			},
+		},
+	}
+
+	if err := gen.Generate(inc); err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+
+	path := filepath.Join(outDir, "ioc", "2026", "DRAG-FILTERED-NET-001-ioc-network.yaml")
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("expected network IOC rule to NOT exist after all indicators filtered, but found: %s", path)
+	}
+}
+
+func TestGenerate_SkipsFileHashWhenAllEmpty(t *testing.T) {
+	outDir := t.TempDir()
+	gen := New(outDir, "test", nil)
+
+	// SHA-256 of the empty file — should be rejected by normalizeIOCValue.
+	inc := &incident.Incident{
+		ID:               "DRAG-FILTERED-HASH-001",
+		Severity:         "high",
+		Description:      "All file hashes are empty-file hashes.",
+		CompromiseWindow: incident.CompromiseWindow{Start: "2026-01-01T00:00:00Z"},
+		Indicators: incident.Indicators{
+			FileHashes: []incident.FileHash{
+				{
+					Algorithm:  "sha256",
+					Value:      "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+					Confidence: 0.90,
+				},
+			},
+		},
+	}
+
+	if err := gen.Generate(inc); err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+
+	path := filepath.Join(outDir, "ioc", "2026", "DRAG-FILTERED-HASH-001-ioc-hashes.yaml")
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("expected file hash rule to NOT exist after empty hash filtered, but found: %s", path)
+	}
+}
+
 func TestRuleID_Deterministic(t *testing.T) {
 	id1 := RuleID("DRAG-001", "ioc", "network")
 	id2 := RuleID("DRAG-001", "ioc", "network")

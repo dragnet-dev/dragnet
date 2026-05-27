@@ -315,13 +315,17 @@ func (g *Generator) generateIOC(inc *incident.Incident, base TemplateData) error
 				d.URLs = append(d.URLs, IOCValue{Value: clean, Confidence: v.Confidence})
 			}
 		}
-		if err := g.writeRule(
-			"templates/ioc/network.tmpl",
-			subdir,
-			base.DragnetID+"-ioc-network.yaml",
-			d,
-		); err != nil {
-			return err
+		
+		// If normalization filtered out everything, don't generate an empty rule
+		if len(d.Domains) > 0 || len(d.IPs) > 0 || len(d.URLs) > 0 {
+			if err := g.writeRule(
+				"templates/ioc/network.tmpl",
+				subdir,
+				base.DragnetID+"-ioc-network.yaml",
+				d,
+			); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -330,20 +334,25 @@ func (g *Generator) generateIOC(inc *incident.Incident, base TemplateData) error
 		d := base
 		d.ID = RuleID(inc.ID, "ioc", "hashes").String()
 		for _, h := range inc.Indicators.FileHashes {
-			d.FileHashes = append(d.FileHashes, HashValue{
-				Algorithm:  h.Algorithm,
-				Value:      h.Value,
-				Filename:   h.Filename,
-				Confidence: h.Confidence,
-			})
+			if clean, ok := normalizeIOCValue(strings.ToLower(h.Algorithm), h.Value); ok {
+				d.FileHashes = append(d.FileHashes, HashValue{
+					Algorithm:  h.Algorithm,
+					Value:      clean,
+					Filename:   h.Filename,
+					Confidence: h.Confidence,
+				})
+			}
 		}
-		if err := g.writeRule(
-			"templates/ioc/file_hash.tmpl",
-			subdir,
-			base.DragnetID+"-ioc-hashes.yaml",
-			d,
-		); err != nil {
-			return err
+		
+		if len(d.FileHashes) > 0 {
+			if err := g.writeRule(
+				"templates/ioc/file_hash.tmpl",
+				subdir,
+				base.DragnetID+"-ioc-hashes.yaml",
+				d,
+			); err != nil {
+				return err
+			}
 		}
 	}
 
