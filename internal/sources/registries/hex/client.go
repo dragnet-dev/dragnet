@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dragnet-dev/dragnet/internal/httpclient"
 	"github.com/dragnet-dev/dragnet/internal/incident"
 )
 
@@ -18,7 +19,7 @@ type Client struct {
 	lastUpdatedAt string
 }
 
-func New() *Client                       { return &Client{http: &http.Client{Timeout: 30 * time.Second}} }
+func New() *Client                       { return &Client{http: &http.Client{Timeout: 30 * time.Second, Transport: httpclient.New()}} }
 func NewWithUpdatedAt(ts string) *Client { c := New(); c.lastUpdatedAt = ts; return c }
 
 func (c *Client) Name() string          { return "hex" }

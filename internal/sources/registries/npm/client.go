@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dragnet-dev/dragnet/internal/httpclient"
 	"github.com/dragnet-dev/dragnet/internal/incident"
 )
 
@@ -30,7 +31,7 @@ type Client struct {
 }
 
 func New() *Client {
-	return &Client{http: &http.Client{Timeout: 60 * time.Second}}
+	return &Client{http: &http.Client{Timeout: 60 * time.Second, Transport: httpclient.New()}}
 }
 
 func NewWithSeq(lastSeq int64) *Client {

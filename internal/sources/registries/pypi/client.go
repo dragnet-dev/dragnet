@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dragnet-dev/dragnet/internal/httpclient"
 	"github.com/dragnet-dev/dragnet/internal/incident"
 	"github.com/mmcdole/gofeed"
 )
@@ -27,7 +28,7 @@ type Client struct {
 }
 
 func New() *Client {
-	return &Client{http: &http.Client{Timeout: 30 * time.Second}}
+	return &Client{http: &http.Client{Timeout: 30 * time.Second, Transport: httpclient.New()}}
 }
 
 func NewWithETag(etag string) *Client {

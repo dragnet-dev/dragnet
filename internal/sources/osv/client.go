@@ -19,6 +19,7 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
+	"github.com/dragnet-dev/dragnet/internal/httpclient"
 	"github.com/dragnet-dev/dragnet/internal/incident"
 )
 
@@ -27,6 +28,14 @@ const (
 	bulkBase   = "https://storage.googleapis.com/osv-vulnerabilities"
 	bulkCutoff = 7 * 24 * time.Hour // use bulk export when since > 7 days ago
 	batchSize  = 100
+
+	// Resource-exhaustion guards for zip decompression. OSV entries are
+	// typically <100 KB; the per-entry cap stops a single oversized advisory
+	// from OOM-ing the runner. The total cap aborts if a compromised upstream
+	// ever ships a fabricated zip containing millions of tiny entries.
+	maxDecompressedEntry = 10 << 20  // 10 MB per JSON entry
+	maxDecompressedTotal = 5 << 30   // 5 GB aggregate across all entries
+	maxZipDownload       = 2 << 30   // 2 GB raw download guard
 )
 
 // osvEcoName maps our internal ecosystem names to OSV ecosystem names.
@@ -101,7 +110,7 @@ type Client struct {
 // New returns a new OSV client.
 func New() *Client {
 	return &Client{
-		http:     &http.Client{Timeout: 30 * time.Second},
+		http:     &http.Client{Timeout: 30 * time.Second, Transport: httpclient.New()},
 		httpBulk: &http.Client{Timeout: 5 * time.Minute},
 	}
 }
@@ -175,7 +184,7 @@ func (c *Client) fetchEcosystem(ctx context.Context, eco string, since time.Time
 	defer os.Remove(tmp.Name())
 	defer tmp.Close()
 
-	if _, err := io.Copy(tmp, resp.Body); err != nil {
+	if _, err := io.Copy(tmp, io.LimitReader(resp.Body, maxZipDownload)); err != nil {
 		return nil, fmt.Errorf("download: %w", err)
 	}
 	if err := tmp.Sync(); err != nil {
@@ -193,6 +202,7 @@ func (c *Client) fetchEcosystem(ctx context.Context, eco string, since time.Time
 	}
 
 	var incs []*incident.Incident
+	var totalDecompressed int64
 	// The npm/pypi all.zip files contain tens of thousands of JSON entries.
 	// Check ctx every 256 files so a cancelled context exits the parse loop
 	// promptly instead of churning for minutes after the parent ctx died.
@@ -209,10 +219,14 @@ func (c *Client) fetchEcosystem(ctx context.Context, eco string, since time.Time
 		if err != nil {
 			continue
 		}
-		data, err := io.ReadAll(rc)
+		data, err := io.ReadAll(io.LimitReader(rc, maxDecompressedEntry))
 		rc.Close()
 		if err != nil {
 			continue
+		}
+		totalDecompressed += int64(len(data))
+		if totalDecompressed > maxDecompressedTotal {
+			return incs, fmt.Errorf("osv: aggregate decompressed size exceeded %d bytes, aborting", maxDecompressedTotal)
 		}
 
 		var adv osvAdvisory

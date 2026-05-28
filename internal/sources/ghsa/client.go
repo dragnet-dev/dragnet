@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dragnet-dev/dragnet/internal/httpclient"
 	"github.com/dragnet-dev/dragnet/internal/incident"
 )
 
@@ -20,11 +21,11 @@ type Client struct {
 }
 
 func New() *Client {
-	return &Client{http: &http.Client{Timeout: 30 * time.Second}}
+	return &Client{http: &http.Client{Timeout: 30 * time.Second, Transport: httpclient.New()}}
 }
 
 func NewWithToken(token string) *Client {
-	return &Client{http: &http.Client{Timeout: 30 * time.Second}, token: token}
+	return &Client{http: &http.Client{Timeout: 30 * time.Second, Transport: httpclient.New()}, token: token}
 }
 
 func (c *Client) Name() string { return "ghsa" }

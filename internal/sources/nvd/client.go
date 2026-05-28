@@ -30,6 +30,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dragnet-dev/dragnet/internal/httpclient"
 	"github.com/dragnet-dev/dragnet/internal/incident"
 )
 
@@ -60,7 +61,7 @@ type Client struct {
 
 func New() *Client {
 	return &Client{
-		http:   &http.Client{Timeout: 60 * time.Second},
+		http:   &http.Client{Timeout: 60 * time.Second, Transport: httpclient.New()},
 		apiKey: os.Getenv("NVD_API_KEY"),
 	}
 }
