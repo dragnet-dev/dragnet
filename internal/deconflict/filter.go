@@ -151,6 +151,32 @@ var blockedDomains = map[string]bool{
 	// Abuse/intel feeds (our own data sources — not IOCs)
 	"abuse.ch": true, "bazaar.abuse.ch": true,
 	"urlhaus.abuse.ch": true, "feodotracker.abuse.ch": true,
+	// CDNs and web fonts — appear in blog post HTML, never C2 infra
+	"cdn.jsdelivr.net": true, "cdnjs.cloudflare.com": true,
+	"fonts.googleapis.com": true, "fonts.gstatic.com": true,
+	"ajax.googleapis.com": true, "code.jquery.com": true,
+	"unpkg.com": true, "cdn.skypack.dev": true,
+	// Developer documentation sites — referenced in blog write-ups
+	"developer.mozilla.org": true, "docs.python.org": true,
+	"docs.rs": true, "docs.github.com": true,
+	"learn.microsoft.com": true, "docs.docker.com": true,
+	// Security research references — sources we cite, not IOCs
+	"cve.mitre.org": true, "exploit-db.com": true,
+	"packetstormsecurity.com": true, "seclists.org": true,
+	"owasp.org": true, "sans.org": true,
+	// Blog / publishing platforms — article hosts, not attacker infrastructure
+	"medium.com": true, "www.medium.com": true,
+	"substack.com": true, "wordpress.com": true, "www.wordpress.com": true,
+	"blogspot.com": true,
+	// CI/CD and code hosting — show up in references and install commands
+	"gitlab.com": true, "www.gitlab.com": true,
+	"sourceforge.net": true,
+	// Social and news — referenced in IOC reports but are not IOCs themselves
+	"x.com": true, "www.x.com": true,
+	"news.ycombinator.com": true, "lobste.rs": true,
+	// Cloud provider consoles and status pages
+	"console.cloud.google.com": true, "status.github.com": true,
+	"portal.azure.com": true, "console.aws.amazon.com": true,
 }
 
 var blockedDomainSuffixes = []string{
