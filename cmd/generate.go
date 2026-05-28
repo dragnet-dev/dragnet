@@ -366,7 +366,7 @@ func writeModuleSTIX(modName string, incidents []*incident.Incident, stixOutDir 
 		return nil
 	}
 
-	shards, err := stix.WriteCombinedBundleShards(stixOutDir, "bundle", bundles)
+	shards, err := stix.WriteCombinedBundleShards(stixOutDir, "bundle", slices.Values(bundles))
 	if err != nil {
 		return fmt.Errorf("write %s stix shards: %w", modName, err)
 	}
@@ -604,7 +604,7 @@ func generateRootSTIX(allModules map[string][]*incident.Incident) error {
 		return nil
 	}
 
-	shards, err := stix.WriteCombinedBundleShards(rootSTIXDir(genSTIXRoot), "bundle", bundles)
+	shards, err := stix.WriteCombinedBundleShards(rootSTIXDir(genSTIXRoot), "bundle", slices.Values(bundles))
 	if err != nil {
 		return fmt.Errorf("write root stix shards: %w", err)
 	}

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"iter"
 	"os"
 	"path/filepath"
 )
@@ -57,12 +58,17 @@ func BuildCombinedBundle(bundles []Bundle) Bundle {
 // hang), and the combined doc is purely a flatten + dedupe of sub-bundles,
 // so no new schema-level invariants need checking.
 //
+// The seq parameter is an iterator so callers can stream bundles without
+// materialising the full slice. Use slices.Values(bundles) when a slice is
+// already in hand; use a channel-backed iterator to avoid ever accumulating
+// all bundles at once.
+//
 // Memory: peak stays O(one object + the running dedupe-id set) instead of
 // O(all objects). Even after the v0.1.8 curated cap, the unsharded write
 // would land ~125-250 MB compact JSON across 5 modules' worth of bundles.
 //
 // Returns the list of relative shard filenames written, in order.
-func WriteCombinedBundleShards(dir, base string, bundles []Bundle) ([]string, error) {
+func WriteCombinedBundleShards(dir, base string, seq iter.Seq[Bundle]) ([]string, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
@@ -94,7 +100,7 @@ func WriteCombinedBundleShards(dir, base string, bundles []Bundle) ([]string, er
 	// produced.
 	w := newShardWriter(dir, base)
 
-	for _, b := range bundles {
+	for b := range seq {
 		for _, obj := range b.Objects {
 			id := objectID(obj)
 			if id == "" || seen[id] {
