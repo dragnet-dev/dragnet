@@ -2,6 +2,7 @@ package typosquat
 
 import (
 	"strings"
+	"sync"
 	"unicode"
 
 	"github.com/dragnet-dev/dragnet/internal/popularity"
@@ -17,24 +18,50 @@ type TyposquatMatch struct {
 	Technique       string
 }
 
-// Detect checks newPkg against the popular packages list and returns the best match
-// if its similarity score meets threshold (0.0–1.0). Returns nil if no match.
-func Detect(newPkg string, popular []popularity.PopularPackage, threshold float64) *TyposquatMatch {
+// normalizedPkg caches the pre-computed forms of a popular package used during
+// detection so normaliseHomoglyphs is not called on the target side per-check.
+type normalizedPkg struct {
+	pkg           popularity.PopularPackage
+	lowName       string
+	homoglyphNorm string
+}
+
+// Detector holds a pre-processed popular-packages list for repeated detection
+// calls. Construct once per ecosystem per sync cycle via NewDetector, then call
+// Detect for each new package name.
+type Detector struct {
+	popular   []normalizedPkg
+	threshold float64
+}
+
+// NewDetector normalizes popular once and returns a Detector ready for reuse.
+func NewDetector(popular []popularity.PopularPackage, threshold float64) *Detector {
+	norms := make([]normalizedPkg, len(popular))
+	for i, p := range popular {
+		low := strings.ToLower(p.Name)
+		norms[i] = normalizedPkg{p, low, normaliseHomoglyphs(low)}
+	}
+	return &Detector{popular: norms, threshold: threshold}
+}
+
+// Detect checks newPkg against the popular packages list and returns the best
+// match if its similarity score meets the threshold. Returns nil if no match.
+func (d *Detector) Detect(newPkg string) *TyposquatMatch {
 	newLow := strings.ToLower(newPkg)
+	newNorm := normaliseHomoglyphs(newLow)
 	var best *TyposquatMatch
-	for _, p := range popular {
-		targetLow := strings.ToLower(p.Name)
-		if newLow == targetLow {
+	for _, p := range d.popular {
+		if newLow == p.lowName {
 			continue
 		}
-		score, technique := similarity(newLow, targetLow)
-		if score >= threshold {
+		score, technique := similarity(newLow, newNorm, p.lowName, p.homoglyphNorm)
+		if score >= d.threshold {
 			if best == nil || score > best.SimilarityScore {
 				m := &TyposquatMatch{
 					NewPackage:      newPkg,
-					TargetPackage:   p.Name,
-					TargetDownloads: p.WeeklyDownloads,
-					TargetImpact:    p.ImpactRating,
+					TargetPackage:   p.pkg.Name,
+					TargetDownloads: p.pkg.WeeklyDownloads,
+					TargetImpact:    p.pkg.ImpactRating,
 					SimilarityScore: score,
 					Technique:       technique,
 				}
@@ -46,10 +73,10 @@ func Detect(newPkg string, popular []popularity.PopularPackage, threshold float6
 }
 
 // similarity returns a 0–1 score and technique name for the most applicable
-// similarity between a and b (both already lowercased).
-func similarity(a, b string) (float64, string) {
+// similarity between a and b (both already lowercased, with pre-computed norms).
+func similarity(a, aNorm, b, bNorm string) (float64, string) {
 	// 1. Homoglyph check — replace look-alike unicode chars and compare
-	if normaliseHomoglyphs(a) == normaliseHomoglyphs(b) {
+	if aNorm == bNorm {
 		return 0.99, "homoglyph"
 	}
 
@@ -161,6 +188,11 @@ func normaliseHomoglyphs(s string) string {
 	return b.String()
 }
 
+// levPool reuses the two row-buffer slices across levenshtein calls to
+// eliminate per-call heap allocation. The pool stores *[2][]int so both
+// rows are returned together in one Put.
+var levPool = sync.Pool{New: func() any { return &[2][]int{} }}
+
 func levenshtein(a, b string) int {
 	if len(a) == 0 {
 		return len(b)
@@ -168,8 +200,21 @@ func levenshtein(a, b string) int {
 	if len(b) == 0 {
 		return len(a)
 	}
-	prev := make([]int, len(b)+1)
-	curr := make([]int, len(b)+1)
+
+	bufs := levPool.Get().(*[2][]int)
+	n := len(b) + 1
+	if cap(bufs[0]) < n {
+		bufs[0] = make([]int, n)
+	} else {
+		bufs[0] = bufs[0][:n]
+	}
+	if cap(bufs[1]) < n {
+		bufs[1] = make([]int, n)
+	} else {
+		bufs[1] = bufs[1][:n]
+	}
+	prev, curr := bufs[0], bufs[1]
+
 	for j := range prev {
 		prev[j] = j
 	}
@@ -184,7 +229,12 @@ func levenshtein(a, b string) int {
 		}
 		prev, curr = curr, prev
 	}
-	return prev[len(b)]
+	result := prev[len(b)]
+
+	// Restore canonical slot order before returning to pool.
+	bufs[0], bufs[1] = prev, curr
+	levPool.Put(bufs)
+	return result
 }
 
 func min3(a, b, c int) int {

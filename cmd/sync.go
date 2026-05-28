@@ -988,17 +988,26 @@ func enrichSupplyIncidents(ctx context.Context, incidents []*incident.Incident, 
 		popularIdx[eco] = m
 	}
 
+	// Build one Detector per ecosystem so normaliseHomoglyphs runs once per
+	// popular package at construction time rather than on every comparison.
+	detectors := make(map[string]*typosquat.Detector, len(popularByEco))
+	for eco, pkgs := range popularByEco {
+		if len(pkgs) > 0 {
+			detectors[eco] = typosquat.NewDetector(pkgs, typosquatThreshold)
+		}
+	}
+
 	_ = ctx // formerly used by FetchDownloads; kept on signature for compatibility
 
 	for _, inc := range incidents {
 		for _, pkg := range inc.Packages {
-			popular, ok := popularByEco[pkg.Ecosystem]
-			if !ok || len(popular) == 0 {
+			det, ok := detectors[pkg.Ecosystem]
+			if !ok {
 				continue
 			}
 
 			// Typosquat detection.
-			if match := typosquat.Detect(pkg.Name, popular, typosquatThreshold); match != nil {
+			if match := det.Detect(pkg.Name); match != nil {
 				inc.AttackType = "typosquat"
 				inc.TyposquatInfo = &incident.TyposquatDetails{
 					NewPackage:            match.NewPackage,
