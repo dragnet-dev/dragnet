@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/dragnet-dev/dragnet/internal/incident"
+	"github.com/dragnet-dev/dragnet/internal/schema"
 )
 
 // ModuleStats summarises incident and IOC counts for a single module.
@@ -68,12 +69,10 @@ type IOCSummary struct {
 	Confidence float64 `json:"confidence,omitempty"`
 }
 
-// SchemaVersion stamps every artifact dragnet writes so consumers can parse
-// defensively across future shape changes. Bump on breaking changes (e.g.
-// field renamed/removed); additive changes (new optional field) don't need
-// a bump. Read by buoy/scope/trawl/port/dredge as the first thing they
-// check when loading a haul artifact.
-const SchemaVersion = "1.0"
+// SchemaVersion is the current haul schema version, sourced from the
+// canonical internal/schema package. Kept as a package-level alias so
+// callers that import index directly don't need a second import.
+const SchemaVersion = schema.Version
 
 // ModuleIndex is the schema for {module}/incidents/index.json.
 type ModuleIndex struct {
@@ -137,7 +136,7 @@ func GenerateModuleIndex(module string, incidents []*incident.Incident, outputDi
 		Incidents: buildIncidentSummaries(incidents),
 	}
 
-	dest := filepath.Join(outputDir, "incidents", "index.json")
+	dest := filepath.Join(outputDir, "incidents", "v1", "index.json")
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return err
 	}
@@ -145,7 +144,14 @@ func GenerateModuleIndex(module string, incidents []*incident.Incident, outputDi
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(dest, data, 0o644)
+	if err := os.WriteFile(dest, data, 0o644); err != nil {
+		return err
+	}
+	ensureSymlink(
+		filepath.Join(outputDir, "incidents", "index.json"),
+		filepath.Join("v1", "index.json"),
+	)
+	return nil
 }
 
 // GenerateRootIndex writes incidents/index.json aggregating all modules.
@@ -175,7 +181,7 @@ func GenerateRootIndex(allModules map[string][]*incident.Incident, rootDir strin
 
 	_ = allIncidents // used via allModules above
 
-	dest := filepath.Join(rootDir, "incidents", "index.json")
+	dest := filepath.Join(rootDir, "incidents", "v1", "index.json")
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return err
 	}
@@ -183,7 +189,14 @@ func GenerateRootIndex(allModules map[string][]*incident.Incident, rootDir strin
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(dest, data, 0o644)
+	if err := os.WriteFile(dest, data, 0o644); err != nil {
+		return err
+	}
+	ensureSymlink(
+		filepath.Join(rootDir, "incidents", "index.json"),
+		filepath.Join("v1", "index.json"),
+	)
+	return nil
 }
 
 func countIOCs(incidents []*incident.Incident) int {

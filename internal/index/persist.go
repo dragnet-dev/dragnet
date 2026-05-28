@@ -47,12 +47,13 @@ const CuratedRecentWindow = 90 * 24 * time.Hour
 const maxShardBytes = 45 * 1024 * 1024 // 45 MB, leaves headroom under 50 MB warning
 
 // WriteAllJSONLShards writes every incident in `incidents` to
-// {outputDir}/incidents/all/{shard}.jsonl, sharded by ID prefix so each file
-// stays well under git's practical size limits.
+// {outputDir}/incidents/v1/all/{shard}.jsonl, sharded by ID prefix so each
+// file stays well under git's practical size limits. A relative symlink
+// incidents/all → v1/all is created for backward compatibility.
 func WriteAllJSONLShards(incidents []*incident.Incident, outputDir string) error {
-	dir := filepath.Join(outputDir, "incidents", "all")
+	dir := filepath.Join(outputDir, "incidents", "v1", "all")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("mkdir all/: %w", err)
+		return fmt.Errorf("mkdir v1/all/: %w", err)
 	}
 
 	// Sort by ID once so shard contents are deterministic across runs even
@@ -92,6 +93,13 @@ func WriteAllJSONLShards(incidents []*incident.Incident, outputDir string) error
 			_ = os.Remove(filepath.Join(dir, e.Name()))
 		}
 	}
+
+	// Backward-compat symlink: incidents/all → v1/all so existing consumers
+	// that read the unversioned path continue to work.
+	ensureSymlink(
+		filepath.Join(outputDir, "incidents", "all"),
+		filepath.Join("v1", "all"),
+	)
 	return nil
 }
 
@@ -233,7 +241,7 @@ func WriteCuratedIndex(module string, incidents []*incident.Incident, outputDir 
 		Incidents: buildIncidentSummaries(curated),
 	}
 
-	dest := filepath.Join(outputDir, "incidents", "index.json")
+	dest := filepath.Join(outputDir, "incidents", "v1", "index.json")
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return err
 	}
@@ -241,7 +249,15 @@ func WriteCuratedIndex(module string, incidents []*incident.Incident, outputDir 
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(dest, data, 0o644)
+	if err := os.WriteFile(dest, data, 0o644); err != nil {
+		return err
+	}
+	// Backward-compat symlink: incidents/index.json → v1/index.json
+	ensureSymlink(
+		filepath.Join(outputDir, "incidents", "index.json"),
+		filepath.Join("v1", "index.json"),
+	)
+	return nil
 }
 
 // ByCVEEntry is one record value in by-cve.json. Mirror of ByPackageEntry
@@ -446,4 +462,21 @@ func PublishedAt(inc *incident.Incident) time.Time {
 		return time.Time{}
 	}
 	return t
+}
+
+// ensureSymlink creates a relative symlink at linkPath pointing to target.
+// If an identical symlink already exists it is left in place. A dangling or
+// wrong-target symlink is replaced; a real file is never touched so we
+// don't accidentally clobber hand-placed content in the haul directory.
+func ensureSymlink(linkPath, target string) {
+	if existing, err := os.Readlink(linkPath); err == nil && existing == target {
+		return // already correct
+	}
+	if info, err := os.Lstat(linkPath); err == nil {
+		if info.Mode()&os.ModeSymlink == 0 {
+			return // real file — leave it alone
+		}
+		_ = os.Remove(linkPath)
+	}
+	_ = os.Symlink(target, linkPath)
 }
