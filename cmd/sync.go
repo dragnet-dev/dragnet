@@ -2,6 +2,9 @@ package cmd
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -46,6 +49,18 @@ import (
 // being absurd; the allSourcesDeadline (5 min) still caps the module.
 const perSourceFetchTimeout = 150 * time.Second
 
+// IOC circuit-breaker thresholds. A single incident that exceeds any of these
+// counts is almost certainly a parsing error (CSS class names, entire page
+// text parsed as domains, etc.) rather than a real threat cluster.
+// Anomalous incidents are routed to drafts/ for human review instead of
+// entering the merge pipeline, preventing garbage from infecting haul.
+const (
+	maxDomainsPerIncident   = 100
+	maxIPsPerIncident       = 100
+	maxHashesPerIncident    = 300
+	maxTotalIOCsPerIncident = 400
+)
+
 // allSourcesDeadline is the absolute wall-clock budget for the parallel-fetch
 // stage of one module. After this, the wg.Wait() bails out, abandons any
 // still-running goroutines, and proceeds with whatever was collected.
@@ -74,15 +89,16 @@ var syncCmd = &cobra.Command{
 }
 
 var (
-	syncModule     string
-	syncSources    string
-	syncEcosystems string
-	syncSince      string
-	syncDryRun     bool
-	syncBackfill   bool
+	syncModule      string
+	syncSources     string
+	syncEcosystems  string
+	syncSince       string
+	syncDryRun      bool
+	syncBackfill    bool
 	syncAllowShrink bool
 	syncRulesRoot   string
 	syncSTIXRoot    string
+	syncForceRegen  bool
 )
 
 func init() {
@@ -108,6 +124,8 @@ func init() {
 	syncCmd.Flags().StringVar(&syncSTIXRoot, "stix-root", "",
 		"Reserved for the distribution split. sync doesn't currently write STIX bundles "+
 			"(generate handles that), so this flag is accepted for symmetry but unused today.")
+	syncCmd.Flags().BoolVar(&syncForceRegen, "force-regen", false,
+		"Ignore the sigma hash cache and regenerate all rules. Use after template changes.")
 }
 
 // backfillSkip lists registry sources excluded during --backfill to avoid re-polling high-volume feeds.
@@ -609,6 +627,29 @@ func (e *SyncEngine) generateModule(ctx context.Context, modName string, modCfg 
 			modName, len(sigmaSet), len(incidents))
 	}
 
+	// Incremental sigma: load the per-module hash cache and pre-compute which
+	// sigma-eligible incidents actually need regeneration. Incidents whose
+	// content hasn't changed since the last run are skipped — on a warm run
+	// this eliminates 95%+ of template renders for large modules.
+	hashCache := loadSigmaHashCache(filepath.Join(dataDir(), "state"), modName)
+	needsRegen := make(map[string]string, len(sigmaSet)) // id → new hash
+	skippedByHash := 0
+	for _, inc := range incidents {
+		if !sigmaSet[inc.ID] {
+			continue
+		}
+		h := hashIncidentForSigma(inc)
+		if hashCache.upToDate(inc.ID, h) {
+			skippedByHash++
+		} else {
+			needsRegen[inc.ID] = h
+		}
+	}
+	if skippedByHash > 0 {
+		log.Printf("[sync][%s] sigma hash cache: skipping %d unchanged incident(s), regenerating %d",
+			modName, skippedByHash, len(needsRegen))
+	}
+
 	// Parallel sigma + IOC generation — sigma.Registry is mutex-protected so
 	// concurrent gen.Generate() calls are safe.
 	workers := runtime.NumCPU()
@@ -666,8 +707,11 @@ func (e *SyncEngine) generateModule(ctx context.Context, modName string, modCfg 
 					continue
 				}
 				if sigmaSet[inc.ID] {
-					if err := gen.Generate(inc); err != nil {
-						log.Printf("[sync][%s] generate %s: %v", modName, inc.ID, err)
+					// Only call Generate() if the content hash changed (or cache is empty).
+					if _, changed := needsRegen[inc.ID]; changed {
+						if err := gen.Generate(inc); err != nil {
+							log.Printf("[sync][%s] generate %s: %v", modName, inc.ID, err)
+						}
 					}
 				} else {
 					skippedNonCurated.Add(1)
@@ -690,6 +734,14 @@ func (e *SyncEngine) generateModule(ctx context.Context, modName string, modCfg 
 	close(incidentsChan)
 	genWG.Wait()
 	close(progressDone)
+
+	// Persist updated hashes for all regenerated incidents.
+	if !syncDryRun {
+		for id, h := range needsRegen {
+			hashCache.set(id, h)
+		}
+		hashCache.save()
+	}
 
 	if t4 := skippedTier4.Load(); t4 > 0 {
 		log.Printf("[sync][%s] skipped sigma+IOC for %d Tier-4 informational records", modName, t4)
@@ -821,6 +873,7 @@ func runSync(_ *cobra.Command, _ []string) error {
 			return err
 		}
 		incs = eng.enrichModule(ctx, modName, since, modCfg, incs)
+		incs = filterAnomalousIncidents(modName, incs, modCfg.OutputDir, syncDryRun)
 		eng.mergeAndPersistModule(modName, modCfg, incs, fetchErrCount)
 	}
 
@@ -951,6 +1004,49 @@ func writeDraftIncidents(draftsDir string, drafts []*incident.Incident, dryRun b
 		}
 	}
 	return nil
+}
+
+// filterAnomalousIncidents checks each incident against the IOC circuit-breaker
+// thresholds. Incidents that exceed any threshold are written as draft YAMLs
+// to {modCfgOutputDir}/incidents/drafts/ for human review, and excluded from
+// the returned slice so they never enter MergeAll.
+//
+// This prevents a single malformed blog post or runaway registry advisory from
+// injecting thousands of false IPs/domains into the authoritative JSONL shards.
+func filterAnomalousIncidents(modName string, incidents []*incident.Incident, modCfgOutputDir string, dryRun bool) []*incident.Incident {
+	var clean []*incident.Incident
+	var anomalous []*incident.Incident
+	for _, inc := range incidents {
+		domains := len(inc.Indicators.Domains)
+		ips := len(inc.Indicators.IPs)
+		hashes := len(inc.Indicators.FileHashes)
+		total := domains + ips + hashes
+		switch {
+		case domains > maxDomainsPerIncident:
+			log.Printf("[circuit-breaker][%s] %s: %d domains exceeds threshold (%d) — routed to drafts", modName, inc.ID, domains, maxDomainsPerIncident)
+			anomalous = append(anomalous, inc)
+		case ips > maxIPsPerIncident:
+			log.Printf("[circuit-breaker][%s] %s: %d IPs exceeds threshold (%d) — routed to drafts", modName, inc.ID, ips, maxIPsPerIncident)
+			anomalous = append(anomalous, inc)
+		case hashes > maxHashesPerIncident:
+			log.Printf("[circuit-breaker][%s] %s: %d file hashes exceeds threshold (%d) — routed to drafts", modName, inc.ID, hashes, maxHashesPerIncident)
+			anomalous = append(anomalous, inc)
+		case total > maxTotalIOCsPerIncident:
+			log.Printf("[circuit-breaker][%s] %s: %d total IOCs exceeds threshold (%d) — routed to drafts", modName, inc.ID, total, maxTotalIOCsPerIncident)
+			anomalous = append(anomalous, inc)
+		default:
+			clean = append(clean, inc)
+		}
+	}
+	if len(anomalous) > 0 {
+		draftsDir := filepath.Join(modCfgOutputDir, "incidents", "drafts")
+		if err := writeDraftIncidents(draftsDir, anomalous, dryRun, modName); err != nil {
+			log.Printf("[circuit-breaker][%s] write drafts: %v", modName, err)
+		}
+		log.Printf("[circuit-breaker][%s] routed %d anomalous incident(s) to drafts, %d proceed to merge",
+			modName, len(anomalous), len(clean))
+	}
+	return clean
 }
 
 // draftYear returns the four-digit year derived from the draft incident's
@@ -1375,4 +1471,109 @@ func filterOSPackages(incidents []*incident.Incident, stateDir string) []*incide
 
 	filter := osv.NewOSFilter(imgPkgSet, true)
 	return filter.FilterAll(incidents)
+}
+
+// sigmaHashCache holds per-incident hashes of the data that drives sigma rule
+// generation. On a warm run with no changes, all hashes match and Generate()
+// is skipped entirely — cutting template render time for large modules by >95%.
+//
+// The cache is per-module and stored at state/sigma-hashes-{module}.json.
+// It is intentionally discarded (not merged) when --force-regen is set or
+// when --backfill wipes the rules directory.
+type sigmaHashCache struct {
+	path   string
+	hashes map[string]string // incident ID → hex-encoded SHA-256
+	dirty  bool
+}
+
+func loadSigmaHashCache(stateDir, modName string) *sigmaHashCache {
+	path := filepath.Join(stateDir, "sigma-hashes-"+modName+".json")
+	c := &sigmaHashCache{path: path, hashes: make(map[string]string)}
+	if syncForceRegen || syncBackfill {
+		// Force-regen: start with empty cache so everything is regenerated.
+		return c
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return c // first run — empty cache
+	}
+	_ = json.Unmarshal(data, &c.hashes)
+	return c
+}
+
+func (c *sigmaHashCache) upToDate(id, hash string) bool {
+	return c.hashes[id] == hash
+}
+
+func (c *sigmaHashCache) set(id, hash string) {
+	if c.hashes[id] != hash {
+		c.hashes[id] = hash
+		c.dirty = true
+	}
+}
+
+func (c *sigmaHashCache) save() {
+	if !c.dirty {
+		return
+	}
+	data, err := json.Marshal(c.hashes)
+	if err != nil {
+		log.Printf("[sigma-cache] marshal: %v", err)
+		return
+	}
+	if err := os.WriteFile(c.path, data, 0o644); err != nil {
+		log.Printf("[sigma-cache] write %s: %v", c.path, err)
+	}
+}
+
+// hashIncidentForSigma produces a short deterministic hash of the incident
+// fields that influence sigma rule content. If the hash is unchanged from the
+// cache, Generate() can be skipped for that incident.
+func hashIncidentForSigma(inc *incident.Incident) string {
+	h := sha256.New()
+
+	// Identity and severity-gating fields.
+	fmt.Fprintf(h, "id=%s\n", inc.ID)
+	fmt.Fprintf(h, "severity=%s\n", inc.Severity)
+	fmt.Fprintf(h, "attack_type=%s\n", inc.AttackType)
+	fmt.Fprintf(h, "confidence=%s\n", inc.Campaign.Confidence)
+	fmt.Fprintf(h, "description=%s\n", inc.Description)
+
+	// IOC fields — sorted for determinism.
+	domains := make([]string, len(inc.Indicators.Domains))
+	for i, d := range inc.Indicators.Domains {
+		domains[i] = d.Value
+	}
+	sort.Strings(domains)
+	fmt.Fprintf(h, "domains=%s\n", strings.Join(domains, ","))
+
+	ips := make([]string, len(inc.Indicators.IPs))
+	for i, ip := range inc.Indicators.IPs {
+		ips[i] = ip.Value
+	}
+	sort.Strings(ips)
+	fmt.Fprintf(h, "ips=%s\n", strings.Join(ips, ","))
+
+	hashes := make([]string, len(inc.Indicators.FileHashes))
+	for i, fh := range inc.Indicators.FileHashes {
+		hashes[i] = fh.Algorithm + ":" + fh.Value
+	}
+	sort.Strings(hashes)
+	fmt.Fprintf(h, "hashes=%s\n", strings.Join(hashes, ","))
+
+	// MITRE techniques — drive the hunting layer.
+	techniques := make([]string, len(inc.Hunting.MITRETechniques))
+	for i, t := range inc.Hunting.MITRETechniques {
+		techniques[i] = t.ID
+	}
+	sort.Strings(techniques)
+	fmt.Fprintf(h, "techniques=%s\n", strings.Join(techniques, ","))
+
+	// Actor tags affect rule metadata.
+	actorIDs := make([]string, len(inc.ActorIDs))
+	copy(actorIDs, inc.ActorIDs)
+	sort.Strings(actorIDs)
+	fmt.Fprintf(h, "actors=%s\n", strings.Join(actorIDs, ","))
+
+	return hex.EncodeToString(h.Sum(nil))
 }
