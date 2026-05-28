@@ -29,6 +29,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/dragnet-dev/dragnet/internal/schema"
 )
 
 // FileEntry describes one consumer-facing artifact.
@@ -51,9 +53,9 @@ type Manifest struct {
 	Files          []FileEntry `json:"files"`
 }
 
-// SchemaVersion stamps the manifest so downstream cache-invalidation tools
-// know which fields to expect. Mirrors index.SchemaVersion intent.
-const SchemaVersion = "1.0"
+// SchemaVersion is sourced from the canonical internal/schema package.
+// Kept as a package-level alias so callers don't need a second import.
+const SchemaVersion = schema.Version
 
 var trackedExts = map[string]bool{
 	".jsonl": true,
@@ -196,10 +198,7 @@ func buildEntry(absPath, relPath, ext string) (FileEntry, error) {
 	}
 	records, err := countRecords(absPath, ext)
 	if err != nil {
-		// Non-fatal — record as 1 and move on. The hash still tells consumers
-		// what changed; we don't want one corrupt JSON file to fail the whole
-		// build.
-		records = 1
+		return FileEntry{}, fmt.Errorf("countRecords %s: %w", relPath, err)
 	}
 	return FileEntry{
 		Path:    relPath,
