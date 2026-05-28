@@ -37,13 +37,14 @@ var doctorCmd = &cobra.Command{
 }
 
 var (
-	doctorModule          string
-	doctorRoot            string
-	doctorRulesRoot       string
-	doctorSTIXRoot        string
-	doctorCompiledRoot    string
-	doctorBackends        string
-	doctorFixStaleRules   bool
+	doctorModule              string
+	doctorRoot                string
+	doctorRulesRoot           string
+	doctorSTIXRoot            string
+	doctorCompiledRoot        string
+	doctorBackends            string
+	doctorFixStaleRules       bool
+	doctorFailOnIOCViolations bool
 )
 
 func init() {
@@ -66,6 +67,10 @@ func init() {
 	doctorCmd.Flags().BoolVar(&doctorFixStaleRules, "fix-stale-rules", false,
 		"Remove stale {module}/rules/rules/ directories left by the pre-v0.1.18 "+
 			"compiledRootForBackend double-rules bug. Requires --compiled-root-base and --backends.")
+	doctorCmd.Flags().BoolVar(&doctorFailOnIOCViolations, "fail-on-ioc-violations", false,
+		"Fail if any merged incident in incidents/all/*.jsonl has missing required fields or "+
+			"anomalously large IOC arrays (signs of a parsing error reaching the output). "+
+			"Use in CI to block corrupted haul commits.")
 }
 
 // moduleReport captures everything we'll cross-check for one module.
@@ -109,6 +114,28 @@ func runDoctor(_ *cobra.Command, _ []string) error {
 	issues := 0
 	for _, r := range reports {
 		issues += printReport(r)
+	}
+
+	// Output IOC validity check: scan merged shards for missing required fields
+	// or IOC arrays that are anomalously large (signs that garbage data reached
+	// the output despite the circuit-breaker). Only runs when explicitly requested
+	// via --fail-on-ioc-violations to keep the default doctor run cheap.
+	if doctorFailOnIOCViolations {
+		for _, modName := range moduleNames {
+			outputDir := modName
+			if cfg != nil {
+				if mc, ok := cfg.Modules[modName]; ok && mc.OutputDir != "" {
+					outputDir = mc.OutputDir
+				}
+			}
+			modRoot := filepath.Join(doctorRoot, outputDir)
+			if violations := checkOutputJSONL(modName, modRoot); violations > 0 {
+				log.Printf("[doctor][%s][ioc-check] FAIL %d IOC violation(s) in merged output", modName, violations)
+				issues += violations
+			} else {
+				log.Printf("[doctor][%s][ioc-check] output IOC check passed", modName)
+			}
+		}
 	}
 
 	// Cross-reference check: anything in feeds/unified.{json,jsonl} or actor
@@ -556,6 +583,83 @@ func printReport(r moduleReport) int {
 	// when total > 5000 is normal, not a failure. No check needed.
 
 	return issues
+}
+
+// checkOutputJSONL validates the merged output shards for a module, checking
+// that every incident has the required fields populated and that no IOC array
+// is anomalously large (which indicates a parsing error in the source pipeline).
+// Returns the number of violations found.
+func checkOutputJSONL(modName, modRoot string) int {
+	allDir := filepath.Join(modRoot, "incidents", "all")
+	entries, err := os.ReadDir(allDir)
+	if err != nil {
+		return 0 // module not present — not a violation
+	}
+
+	violations := 0
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") {
+			continue
+		}
+		f, err := os.Open(filepath.Join(allDir, e.Name()))
+		if err != nil {
+			continue
+		}
+		sc := bufio.NewScanner(f)
+		sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+		for sc.Scan() {
+			var rec map[string]any
+			if json.Unmarshal(sc.Bytes(), &rec) != nil {
+				continue
+			}
+			id, _ := rec["id"].(string)
+
+			// Required top-level fields.
+			for _, field := range []string{"id", "attack_type", "severity", "description"} {
+				if v, _ := rec[field].(string); v == "" {
+					log.Printf("[doctor][%s][ioc-check] %s: missing required field %q", modName, id, field)
+					violations++
+				}
+			}
+			pkgs, _ := rec["packages"].([]any)
+			refs, _ := rec["references"].([]any)
+			if len(pkgs) == 0 && len(refs) == 0 {
+				log.Printf("[doctor][%s][ioc-check] %s: no packages and no references", modName, id)
+				violations++
+			}
+
+			// IOC count sanity checks — mirrors circuit-breaker thresholds in sync.go.
+			inds, _ := rec["indicators"].(map[string]any)
+			if inds != nil {
+				doms := iocDocCount(inds, "domains")
+				ips := iocDocCount(inds, "ips")
+				hashes := iocDocCount(inds, "file_hashes")
+				total := doms + ips + hashes
+				switch {
+				case doms > maxDomainsPerIncident:
+					log.Printf("[doctor][%s][ioc-check] %s: %d domains exceeds threshold (%d)", modName, id, doms, maxDomainsPerIncident)
+					violations++
+				case ips > maxIPsPerIncident:
+					log.Printf("[doctor][%s][ioc-check] %s: %d IPs exceeds threshold (%d)", modName, id, ips, maxIPsPerIncident)
+					violations++
+				case hashes > maxHashesPerIncident:
+					log.Printf("[doctor][%s][ioc-check] %s: %d hashes exceeds threshold (%d)", modName, id, hashes, maxHashesPerIncident)
+					violations++
+				case total > maxTotalIOCsPerIncident:
+					log.Printf("[doctor][%s][ioc-check] %s: %d total IOCs exceeds threshold (%d)", modName, id, total, maxTotalIOCsPerIncident)
+					violations++
+				}
+			}
+		}
+		_ = f.Close()
+	}
+	return violations
+}
+
+// iocDocCount returns the length of a JSON array field inside an indicators map.
+func iocDocCount(inds map[string]any, field string) int {
+	arr, _ := inds[field].([]any)
+	return len(arr)
 }
 
 func countLines(path string) int {
