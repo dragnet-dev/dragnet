@@ -147,12 +147,21 @@ func (e *CrossEnricher) linkSharedActors(allModules map[string][]*incident.Incid
 		}
 
 		for _, entry := range entries {
+			// Build existing link set to skip duplicates without O(N) scans.
+			existing := make(map[string]struct{}, len(entry.Incident.CrossDomainLinks))
+			for _, l := range entry.Incident.CrossDomainLinks {
+				existing[l.Module+"\x00"+l.IncidentID+"\x00"+l.Relationship] = struct{}{}
+			}
 			for _, other := range entries {
 				if other.Incident == entry.Incident {
 					continue
 				}
-				entry.Incident.CrossDomainLinks = appendLinkOnce(
-					entry.Incident.CrossDomainLinks,
+				key := other.Module + "\x00" + other.Incident.ID + "\x00same_actor"
+				if _, dup := existing[key]; dup {
+					continue
+				}
+				existing[key] = struct{}{}
+				entry.Incident.CrossDomainLinks = append(entry.Incident.CrossDomainLinks,
 					incident.CrossDomainLink{
 						Module:       other.Module,
 						IncidentID:   other.Incident.ID,
@@ -167,6 +176,16 @@ func (e *CrossEnricher) linkSharedActors(allModules map[string][]*incident.Incid
 }
 
 func (e *CrossEnricher) linkSharedInfrastructure(allModules map[string][]*incident.Incident, iocIndex map[string][]iocAppearance) {
+	// Pre-build per-incident IOC type index to avoid O(indicators) scan inside inner loop.
+	iocTypeCache := make(map[*incident.Incident]map[string]string)
+	for _, appearances := range iocIndex {
+		for _, app := range appearances {
+			if iocTypeCache[app.Incident] == nil {
+				iocTypeCache[app.Incident] = buildIOCTypeIndex(app.Incident)
+			}
+		}
+	}
+
 	for iocVal, appearances := range iocIndex {
 		seenModules := map[string]bool{}
 		for _, a := range appearances {
@@ -177,13 +196,22 @@ func (e *CrossEnricher) linkSharedInfrastructure(allModules map[string][]*incide
 		}
 
 		for _, app := range appearances {
+			iocType := iocTypeCache[app.Incident][iocVal]
+			// Build existing link set to skip duplicates without O(N) scans.
+			existing := make(map[string]struct{}, len(app.Incident.CrossDomainLinks))
+			for _, l := range app.Incident.CrossDomainLinks {
+				existing[l.Module+"\x00"+l.IncidentID+"\x00"+l.Relationship] = struct{}{}
+			}
 			for _, other := range appearances {
 				if other.Incident == app.Incident {
 					continue
 				}
-				iocType := iocTypeOfValue(app.Incident, iocVal)
-				app.Incident.CrossDomainLinks = appendLinkOnce(
-					app.Incident.CrossDomainLinks,
+				key := other.Module + "\x00" + other.Incident.ID + "\x00shared_infrastructure"
+				if _, dup := existing[key]; dup {
+					continue
+				}
+				existing[key] = struct{}{}
+				app.Incident.CrossDomainLinks = append(app.Incident.CrossDomainLinks,
 					incident.CrossDomainLink{
 						Module:       other.Module,
 						IncidentID:   other.Incident.ID,
@@ -213,6 +241,25 @@ func iocTypeOfValue(inc *incident.Incident, value string) string {
 		}
 	}
 	return "hash"
+}
+
+// buildIOCTypeIndex builds a map of IOC value → type for a single incident,
+// used to avoid repeated linear scans inside the infrastructure linking loop.
+func buildIOCTypeIndex(inc *incident.Incident) map[string]string {
+	total := len(inc.Indicators.Domains) + len(inc.Indicators.IPs) + len(inc.Indicators.FileHashes)
+	m := make(map[string]string, total)
+	for _, d := range inc.Indicators.Domains {
+		m[d.Value] = "domain"
+	}
+	for _, ip := range inc.Indicators.IPs {
+		m[ip.Value] = "ip"
+	}
+	for _, h := range inc.Indicators.FileHashes {
+		if _, exists := m[h.Value]; !exists {
+			m[h.Value] = "hash"
+		}
+	}
+	return m
 }
 
 func bestActorConfidence(a, b *incident.Incident) float64 {
