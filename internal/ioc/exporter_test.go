@@ -29,8 +29,9 @@ func TestExport(t *testing.T) {
 		},
 	}
 
-	if err := e.Export(inc, dir); err != nil {
-		t.Fatalf("Export: %v", err)
+	e.Export(inc)
+	if err := e.WriteFiles(dir); err != nil {
+		t.Fatalf("WriteFiles: %v", err)
 	}
 
 	checkFile := func(name, expected string) {
@@ -77,10 +78,9 @@ func TestExportDedup(t *testing.T) {
 		},
 	}
 
-	if err := e.Export(inc1, dir); err != nil {
-		t.Fatal(err)
-	}
-	if err := e.Export(inc2, dir); err != nil {
+	e.Export(inc1)
+	e.Export(inc2)
+	if err := e.WriteFiles(dir); err != nil {
 		t.Fatal(err)
 	}
 
@@ -116,7 +116,9 @@ func TestExportScrubsStaleDomainFeedEntries(t *testing.T) {
 			Domains: []incident.IndicatorValue{{Value: "new-bad.example.net"}},
 		},
 	}
-	if err := New().Export(inc, dir); err != nil {
+	exp := New()
+	exp.Export(inc)
+	if err := exp.WriteFiles(dir); err != nil {
 		t.Fatal(err)
 	}
 
@@ -157,7 +159,9 @@ func TestExportScrubsStaleUnifiedDomainEntries(t *testing.T) {
 			Domains: []incident.IndicatorValue{{Value: "fresh.example.net"}},
 		},
 	}
-	if err := New().Export(inc, dir); err != nil {
+	exp := New()
+	exp.Export(inc)
+	if err := exp.WriteFiles(dir); err != nil {
 		t.Fatal(err)
 	}
 

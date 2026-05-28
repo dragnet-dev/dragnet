@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/dragnet-dev/dragnet/internal/deconflict"
 	"github.com/dragnet-dev/dragnet/internal/incident"
@@ -58,19 +59,23 @@ func isLikelyDomain(s string) bool {
 	return true
 }
 
-// Exporter writes plain-text and unified JSON IOC feed files.
-// Output files: domains.txt, ips.txt, sha256.txt, sha1.txt, md5.txt, unified.json
-type Exporter struct{}
+// Exporter accumulates IOCs from multiple incidents in memory and writes all
+// feed files in a single pass via WriteFiles. This avoids the O(N) read-sort-
+// rewrite amplification that results from calling appendLines per incident.
+// All public methods are safe for concurrent use.
+type Exporter struct {
+	mu      sync.Mutex
+	domains []string
+	ips     []string
+	hashes  map[string][]string
+	unified []UnifiedEntry
+}
 
-func New() *Exporter { return &Exporter{} }
+func New() *Exporter { return &Exporter{hashes: make(map[string][]string)} }
 
-// Export appends all IOCs from the incident into the feed files in dir.
-// Existing entries are deduplicated.
-func (e *Exporter) Export(inc *incident.Incident, dir string) error {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
-	}
-
+// Export collects all IOCs from inc into memory. Call WriteFiles once all
+// incidents have been processed to flush to disk.
+func (e *Exporter) Export(inc *incident.Incident) {
 	// Collect domains — reject bare IPs and malformed values.
 	// If a parser incorrectly classifies an IP as a domain, move it to IPs.
 	var domains, promoIPs []string
@@ -80,9 +85,6 @@ func (e *Exporter) Export(inc *incident.Incident, dir string) error {
 		} else if isLikelyDomain(d.Value) {
 			domains = append(domains, d.Value)
 		}
-	}
-	if err := appendDomainLines(filepath.Join(dir, "domains.txt"), domains); err != nil {
-		return fmt.Errorf("domains.txt: %w", err)
 	}
 
 	// Collect IPs — only syntactically valid, publicly-routable addresses.
@@ -97,25 +99,72 @@ func (e *Exporter) Export(inc *incident.Incident, dir string) error {
 			ips = append(ips, ip)
 		}
 	}
-	if err := appendIPLines(filepath.Join(dir, "ips.txt"), ips); err != nil {
-		return fmt.Errorf("ips.txt: %w", err)
-	}
 
-	// Collect hashes by algorithm
 	hashes := map[string][]string{}
 	for _, h := range inc.Indicators.FileHashes {
 		algo := strings.ToLower(h.Algorithm)
 		hashes[algo] = append(hashes[algo], h.Value)
 	}
-	for _, algo := range []string{"sha256", "sha1", "md5"} {
-		fname := algo + ".txt"
-		if err := appendLines(filepath.Join(dir, fname), hashes[algo]); err != nil {
-			return fmt.Errorf("%s: %w", fname, err)
+
+	// Build unified entries inline (same filtering as flushUnified).
+	var unified []UnifiedEntry
+	for _, d := range inc.Indicators.Domains {
+		if isLikelyDomain(d.Value) {
+			unified = append(unified, UnifiedEntry{Type: "domain", Value: d.Value, IncidentID: inc.ID, Sources: d.Sources, Confidence: d.Confidence})
+		} else if isPublicIP(d.Value) {
+			unified = append(unified, UnifiedEntry{Type: "ip", Value: d.Value, IncidentID: inc.ID, Sources: d.Sources, Confidence: d.Confidence})
 		}
 	}
+	for _, ip := range inc.Indicators.IPs {
+		if isPublicIP(ip.Value) {
+			unified = append(unified, UnifiedEntry{Type: "ip", Value: ip.Value, IncidentID: inc.ID, Sources: ip.Sources, Confidence: ip.Confidence})
+		}
+	}
+	for _, u := range inc.Indicators.URLs {
+		if !deconflict.URL(u.Value) {
+			unified = append(unified, UnifiedEntry{Type: "url", Value: u.Value, IncidentID: inc.ID, Sources: u.Sources, Confidence: u.Confidence})
+		}
+	}
+	for _, h := range inc.Indicators.FileHashes {
+		unified = append(unified, UnifiedEntry{
+			Type:       h.Algorithm,
+			Value:      h.Value,
+			IncidentID: inc.ID,
+			Sources:    h.Sources,
+			Confidence: h.Confidence,
+			Filename:   h.Filename,
+			Algorithm:  h.Algorithm,
+		})
+	}
 
-	// Unified JSON
-	return appendUnified(filepath.Join(dir, "unified.json"), inc)
+	e.mu.Lock()
+	e.domains = append(e.domains, domains...)
+	e.ips = append(e.ips, ips...)
+	for algo, vals := range hashes {
+		e.hashes[algo] = append(e.hashes[algo], vals...)
+	}
+	e.unified = append(e.unified, unified...)
+	e.mu.Unlock()
+}
+
+// WriteFiles merges all accumulated IOCs with any pre-existing feed files and
+// writes each file exactly once. Must be called after all Export calls finish.
+func (e *Exporter) WriteFiles(dir string) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	if err := appendFilteredLines(filepath.Join(dir, "domains.txt"), e.domains, isLikelyDomain); err != nil {
+		return fmt.Errorf("domains.txt: %w", err)
+	}
+	if err := appendFilteredLines(filepath.Join(dir, "ips.txt"), e.ips, isPublicIP); err != nil {
+		return fmt.Errorf("ips.txt: %w", err)
+	}
+	for _, algo := range []string{"sha256", "sha1", "md5"} {
+		if err := appendLines(filepath.Join(dir, algo+".txt"), e.hashes[algo]); err != nil {
+			return fmt.Errorf("%s.txt: %w", algo, err)
+		}
+	}
+	return flushUnified(filepath.Join(dir, "unified.json"), e.unified)
 }
 
 // ContainerImageEntry is one record in the container-images.json feed.
@@ -398,8 +447,9 @@ func uniqueStrings(slice []string, s string) []string {
 	return append(slice, s)
 }
 
-func appendUnified(path string, inc *incident.Incident) error {
-	// Load existing entries
+// flushUnified merges newEntries with any pre-existing unified.json at path,
+// deduplicates, and writes unified.json + unified.jsonl exactly once.
+func flushUnified(path string, newEntries []UnifiedEntry) error {
 	var entries []UnifiedEntry
 	if data, err := os.ReadFile(path); err == nil {
 		_ = json.Unmarshal(data, &entries)
@@ -410,42 +460,12 @@ func appendUnified(path string, inc *incident.Incident) error {
 	for _, e := range entries {
 		seen[e.Type+"|"+e.Value+"|"+e.IncidentID] = true
 	}
-
-	add := func(e UnifiedEntry) {
+	for _, e := range newEntries {
 		key := e.Type + "|" + e.Value + "|" + e.IncidentID
 		if !seen[key] {
 			seen[key] = true
 			entries = append(entries, e)
 		}
-	}
-
-	for _, d := range inc.Indicators.Domains {
-		if isLikelyDomain(d.Value) {
-			add(UnifiedEntry{Type: "domain", Value: d.Value, IncidentID: inc.ID, Sources: d.Sources, Confidence: d.Confidence})
-		} else if isPublicIP(d.Value) {
-			add(UnifiedEntry{Type: "ip", Value: d.Value, IncidentID: inc.ID, Sources: d.Sources, Confidence: d.Confidence})
-		}
-	}
-	for _, ip := range inc.Indicators.IPs {
-		if isPublicIP(ip.Value) {
-			add(UnifiedEntry{Type: "ip", Value: ip.Value, IncidentID: inc.ID, Sources: ip.Sources, Confidence: ip.Confidence})
-		}
-	}
-	for _, u := range inc.Indicators.URLs {
-		if !deconflict.URL(u.Value) {
-			add(UnifiedEntry{Type: "url", Value: u.Value, IncidentID: inc.ID, Sources: u.Sources, Confidence: u.Confidence})
-		}
-	}
-	for _, h := range inc.Indicators.FileHashes {
-		add(UnifiedEntry{
-			Type:       h.Algorithm,
-			Value:      h.Value,
-			IncidentID: inc.ID,
-			Sources:    h.Sources,
-			Confidence: h.Confidence,
-			Filename:   h.Filename,
-			Algorithm:  h.Algorithm,
-		})
 	}
 
 	data, err := json.MarshalIndent(entries, "", "  ")
@@ -455,8 +475,6 @@ func appendUnified(path string, inc *incident.Incident) error {
 	if err := os.WriteFile(path, data, 0o644); err != nil {
 		return err
 	}
-	// Also write a stream/grep-friendly JSONL alongside unified.json so
-	// consumers don't have to parse a multi-MB JSON array to scan the feed.
 	return writeUnifiedJSONL(strings.TrimSuffix(path, ".json")+".jsonl", entries)
 }
 

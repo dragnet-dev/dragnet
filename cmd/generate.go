@@ -243,9 +243,10 @@ func runGenerate(_ *cobra.Command, _ []string) error {
 			iocExp := ioc.New()
 			feedsDir := filepath.Join(modCfg.OutputDir, "feeds")
 			for _, inc := range modIncidents {
-				if err := iocExp.Export(inc, feedsDir); err != nil {
-					log.Printf("[generate][%s] ioc export %s: %v", modName, inc.ID, err)
-				}
+				iocExp.Export(inc)
+			}
+			if err := iocExp.WriteFiles(feedsDir); err != nil {
+				log.Printf("[generate][%s] ioc flush: %v", modName, err)
 			}
 		}
 	}

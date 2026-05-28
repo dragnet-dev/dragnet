@@ -483,6 +483,7 @@ func (e *SyncEngine) mergeAndPersistModule(modName string, modCfg config.ModuleC
 	// Persist the full merged incident set as the authoritative haul data.
 	// Belt-and-braces shrink guard: refuse to persist if the post-merge set
 	// lost more than half of what was on disk (bypass with --allow-shrink).
+	persistOK := false
 	if !syncDryRun {
 		if priorCount > 1000 && len(incidents)*2 < priorCount && !syncAllowShrink {
 			log.Printf("[sync][%s] REFUSING PERSIST: merged set (%d) is <50%% of prior on-disk (%d). "+
@@ -491,8 +492,10 @@ func (e *SyncEngine) mergeAndPersistModule(modName string, modCfg config.ModuleC
 				modName, len(incidents), priorCount)
 		} else {
 			persistStart := time.Now()
+			var persistErr error
 			if err := index.WriteAllJSONLShards(incidents, modCfg.OutputDir); err != nil {
 				log.Printf("[sync][%s] persist all.jsonl: %v", modName, err)
+				persistErr = err
 			}
 			if err := index.WriteByPackageLookup(incidents, modCfg.OutputDir); err != nil {
 				log.Printf("[sync][%s] persist by-package: %v", modName, err)
@@ -504,6 +507,24 @@ func (e *SyncEngine) mergeAndPersistModule(modName string, modCfg config.ModuleC
 				log.Printf("[sync][%s] persist index.json: %v", modName, err)
 			}
 			log.Printf("[sync][%s] persist: done in %s", modName, time.Since(persistStart).Round(time.Second))
+			persistOK = persistErr == nil
+		}
+	}
+
+	// Checkpoint the per-module cursor immediately after data is safely on
+	// disk. Moving this here (rather than after rule generation) means a crash
+	// mid-generation doesn't force a full re-fetch on the next run — the sigma
+	// hash cache will handle regenerating only the missing rules.
+	if persistOK && fetchErrCount == 0 && e.sinceOverride == nil {
+		now := time.Now().UTC()
+		if e.st.Sources == nil {
+			e.st.Sources = make(map[string]state.SourceState)
+		}
+		src := e.st.Sources[modName]
+		src.LastSync = &now
+		e.st.Sources[modName] = src
+		if err := e.stateMgr.Save(filepath.Join(dataDir(), "state/last_sync.json"), e.st); err != nil {
+			log.Printf("[sync][%s] checkpoint cursor: %v", modName, err)
 		}
 	}
 
@@ -721,9 +742,7 @@ func (e *SyncEngine) generateModule(ctx context.Context, modName string, modCfg 
 						log.Printf("[sync][%s] container export %s: %v", modName, inc.ID, err)
 					}
 				} else {
-					if err := e.iocExp.Export(inc, feedsDir); err != nil {
-						log.Printf("[sync][%s] ioc export %s: %v", modName, inc.ID, err)
-					}
+					e.iocExp.Export(inc)
 				}
 			}
 		}()
@@ -734,6 +753,12 @@ func (e *SyncEngine) generateModule(ctx context.Context, modName string, modCfg 
 	close(incidentsChan)
 	genWG.Wait()
 	close(progressDone)
+
+	if !syncDryRun {
+		if err := e.iocExp.WriteFiles(feedsDir); err != nil {
+			log.Printf("[sync][%s] ioc flush: %v", modName, err)
+		}
+	}
 
 	// Persist updated hashes for all regenerated incidents.
 	if !syncDryRun {
@@ -778,20 +803,6 @@ func (e *SyncEngine) generateModule(ctx context.Context, modName string, modCfg 
 		}
 	}
 
-	// Persist per-module cursor. Skip when any source errored — re-fetching
-	// from the old cursor on the next run is safer than skipping the window.
-	if !syncDryRun && e.sinceOverride == nil && e.moduleFetchErrors[modName] == 0 {
-		now := time.Now().UTC()
-		if e.st.Sources == nil {
-			e.st.Sources = make(map[string]state.SourceState)
-		}
-		src := e.st.Sources[modName]
-		src.LastSync = &now
-		e.st.Sources[modName] = src
-		if err := e.stateMgr.Save(filepath.Join(dataDir(), "state/last_sync.json"), e.st); err != nil {
-			log.Printf("[sync][%s] save state: %v", modName, err)
-		}
-	}
 }
 
 // persistState saves the sigma registry, actor profiles, and final state file.
