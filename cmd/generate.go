@@ -730,11 +730,16 @@ func backfillDetectionRules(
 			if err != nil || d.IsDir() {
 				return nil
 			}
-			base := d.Name()
-			// Match known incident IDs as a prefix of the filename.
+			// Extract incident ID from filename. Rule filenames are always
+			// "{incident-id}-{rule-slug}.ext". IDs have the form
+			// "dragnet-{module}-{year}-{N}" (4+ dash-separated components).
+			// Try candidate prefixes from longest to shortest rather than
+			// scanning all knownIDs — O(depth) instead of O(N incidents).
+			base := strings.TrimSuffix(d.Name(), filepath.Ext(d.Name()))
+			parts := strings.Split(base, "-")
 			var matchedInc *incident.Incident
-			for id, inc := range knownIDs {
-				if strings.HasPrefix(base, id) {
+			for n := len(parts); n >= 4; n-- {
+				if inc, ok := knownIDs[strings.Join(parts[:n], "-")]; ok {
 					matchedInc = inc
 					break
 				}
@@ -748,10 +753,10 @@ func backfillDetectionRules(
 			if err != nil {
 				rel = base
 			}
-			parts := strings.SplitN(rel, string(filepath.Separator), 3)
+			relParts := strings.SplitN(rel, string(filepath.Separator), 3)
 			layer := ""
-			if len(parts) >= 2 {
-				layer = parts[0]
+			if len(relParts) >= 2 {
+				layer = relParts[0]
 			}
 
 			// Path relative to module root in the satellite repo.

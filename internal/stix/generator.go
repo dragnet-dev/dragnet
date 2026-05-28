@@ -252,6 +252,64 @@ func GenerateBundle(inc *incident.Incident) Bundle {
 		}
 	}
 
+	// Secondary actors — emit intrusion-set objects for all attributed actor IDs
+	// beyond the one already covered by Campaign.Actor above.
+	if actorStore != nil {
+		primaryProfileID := ""
+		if inc.Campaign.Actor != "" {
+			if p, ok := actorStore.Lookup(inc.Campaign.Actor); ok {
+				primaryProfileID = p.ID
+			}
+		}
+		for _, slug := range inc.ActorIDs {
+			if slug == primaryProfileID {
+				continue // already emitted above
+			}
+			profile, ok := actorStore.LookupByID(slug)
+			if !ok {
+				continue
+			}
+			isID := StixID("intrusion-set", profile.ID)
+			objects = append(objects, IntrusionSet{
+				Common: Common{
+					Type:        "intrusion-set",
+					ID:          isID,
+					SpecVersion: "2.1",
+					Created:     now,
+					Modified:    now,
+					Labels:      labelsForAttackType(inc.AttackType),
+				},
+				Name:        profile.Name,
+				Description: profile.Description,
+				Aliases:     profile.Aliases,
+				FirstSeen:   profile.FirstSeen,
+				LastSeen:    profile.LastSeen,
+			})
+			if campaignID != "" {
+				objects = append(objects, rel(now, "attributed-to", campaignID, isID, labelsForAttackType(inc.AttackType)))
+			}
+			for _, ttp := range profile.TTPs {
+				apID := StixID("attack-pattern", ttp.ID)
+				objects = append(objects, AttackPattern{
+					Common: Common{
+						Type:        "attack-pattern",
+						ID:          apID,
+						SpecVersion: "2.1",
+						Created:     now,
+						Modified:    now,
+						ExternalRefs: []ExternalRef{{
+							SourceName: "mitre-attack",
+							ExternalID: ttp.ID,
+							URL:        mitreURL(ttp.ID),
+						}},
+					},
+					Name: ttp.Name,
+				})
+				objects = append(objects, rel(now, "uses", isID, apID, labelsForAttackType(inc.AttackType)))
+			}
+		}
+	}
+
 	// Malware — derived from campaign + attack type
 	var malwareID string
 	if campaignID != "" {

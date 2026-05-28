@@ -254,6 +254,8 @@ func objectID(obj any) string {
 		return v.ID
 	case Vulnerability:
 		return v.ID
+	case IntrusionSet:
+		return v.ID
 	case Relationship:
 		return v.ID
 	}

@@ -227,15 +227,54 @@ func describeVictim(v victim) string {
 	return strings.Join(parts, "; ")
 }
 
-// flattenWS collapses any internal whitespace (newlines, tabs, multiple
-// spaces) into single spaces. ransomware.live publishes some victim names
-// with embedded line breaks (multi-line addresses, multi-sentence sector
-// descriptions). When that text is later embedded in a Sigma rule's
-// description block scalar, the unindented newlines break YAML parsing
-// across every downstream backend. Normalising at ingest avoids the issue
-// once and forever.
+// flattenWS collapses any internal whitespace and repairs double-encoded UTF-8
+// sequences. ransomware.live occasionally stores victim names whose UTF-8 bytes
+// were decoded as Latin-1 (e.g. U+2019 → â\x80\x99). We reverse that by
+// re-encoding as Latin-1 and decoding as UTF-8; any C1 control characters that
+// survive are stripped. Both conditions break YAML parsing in downstream backends.
 func flattenWS(s string) string {
+	s = fixMojibake(s)
 	return strings.Join(strings.Fields(s), " ")
+}
+
+// fixMojibake attempts to reverse UTF-8-bytes-as-Latin-1 double-encoding, then
+// strips any remaining C1 control characters (U+0080–U+009F).
+func fixMojibake(s string) string {
+	// Attempt full reversal: encode as Latin-1, decode as UTF-8.
+	if b, err := encodeAsLatin1(s); err == nil {
+		if fixed, err := decodeAsUTF8(b); err == nil {
+			s = fixed
+		}
+	}
+	// Strip any remaining C1 control characters.
+	var out strings.Builder
+	for _, r := range s {
+		if r < 0x80 || r > 0x9F {
+			out.WriteRune(r)
+		}
+	}
+	return out.String()
+}
+
+func encodeAsLatin1(s string) ([]byte, error) {
+	b := make([]byte, 0, len(s))
+	for _, r := range s {
+		if r > 0xFF {
+			return nil, fmt.Errorf("rune out of Latin-1 range: %U", r)
+		}
+		b = append(b, byte(r))
+	}
+	return b, nil
+}
+
+func decodeAsUTF8(b []byte) (string, error) {
+	s := string(b)
+	for _, r := range s {
+		if r == '�' {
+			return "", fmt.Errorf("invalid UTF-8")
+		}
+	}
+	return s, nil
 }
 
 func slugify(s string) string {
@@ -273,7 +312,14 @@ func sectorList(s string) []string {
 	if s == "" {
 		return nil
 	}
-	return []string{s}
+	// ransomware.live sometimes returns comma-separated sectors ("Healthcare, Finance").
+	var out []string
+	for _, part := range strings.Split(s, ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
 }
 
 // fixSingleSlash corrects "http:/host" → "http://host" from the

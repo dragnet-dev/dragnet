@@ -536,10 +536,18 @@ func runSync(_ *cobra.Command, _ []string) error {
 				continue
 			}
 			incidents := moduleIncidents[modName]
-			_ = index.WriteAllJSONLShards(incidents, modCfg.OutputDir)
-			_ = index.WriteByPackageLookup(incidents, modCfg.OutputDir)
-			_ = index.WriteByCVELookup(modName, incidents, modCfg.OutputDir)
-			_ = index.WriteCuratedIndex(modName, incidents, modCfg.OutputDir)
+			if err := index.WriteAllJSONLShards(incidents, modCfg.OutputDir); err != nil {
+				log.Printf("[sync][%s] dedup re-persist shards: %v", modName, err)
+			}
+			if err := index.WriteByPackageLookup(incidents, modCfg.OutputDir); err != nil {
+				log.Printf("[sync][%s] dedup re-persist package lookup: %v", modName, err)
+			}
+			if err := index.WriteByCVELookup(modName, incidents, modCfg.OutputDir); err != nil {
+				log.Printf("[sync][%s] dedup re-persist cve lookup: %v", modName, err)
+			}
+			if err := index.WriteCuratedIndex(modName, incidents, modCfg.OutputDir); err != nil {
+				log.Printf("[sync][%s] dedup re-persist curated index: %v", modName, err)
+			}
 		}
 	}
 
@@ -899,12 +907,15 @@ func loadActorStore(ctx context.Context, lastETag string) (*actor.Store, string)
 			}
 			if len(profiles) > 0 {
 				log.Printf("[sync] mitre: loaded %d actor profiles from ATT&CK bundle (re-fetch)", len(profiles))
+				actor.MergeLinkedIncidents(profiles, store)
 				return actor.Load(profiles), newETag
 			}
 		}
 		return store, newETag
 	}
 	log.Printf("[sync] mitre: loaded %d actor profiles from ATT&CK bundle", len(profiles))
+	diskStore, _ := actor.ReadProfiles(filepath.Join(dataDir(), "actors/profiles"))
+	actor.MergeLinkedIncidents(profiles, diskStore)
 	return actor.Load(profiles), newETag
 }
 
