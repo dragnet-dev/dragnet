@@ -7,7 +7,7 @@ import (
 )
 
 const (
-	minAliasLen        = 6 // ignore aliases shorter than this to avoid false positives
+	minAliasLen        = 6 // threshold: long aliases use Aho-Corasick, short ones use word-boundary regex
 	explicitConfidence = 0.90
 	inferredConfidence = 0.65
 	// descScanLen previously capped description scanning at 200 chars, which
@@ -103,13 +103,24 @@ func findMatches(inc *incident.Incident, store *Store) map[string]string {
 	}
 	combined := strings.ToLower(sb.String())
 
-	for alias, slug := range store.aliases {
-		if len(alias) < minAliasLen {
-			continue
-		}
-		if strings.Contains(combined, alias) {
+	// Aho-Corasick scan for long aliases (O(text + matches) instead of O(aliases × text)).
+	if store.trie != nil {
+		for _, hit := range store.trie.MatchString(combined) {
+			slug := store.acSlugs[int(hit.Pattern())]
 			if _, alreadyExplicit := matches[slug]; !alreadyExplicit {
 				matches[slug] = "inferred"
+			}
+		}
+	}
+	// Word-boundary regex scan for short aliases that would cause false positives
+	// without boundary checking (e.g. "zinc" must not match "zinc oxide").
+	if store.shortRe != nil {
+		for _, found := range store.shortRe.FindAllString(combined, -1) {
+			slug := store.aliases[strings.ToLower(found)]
+			if slug != "" {
+				if _, alreadyExplicit := matches[slug]; !alreadyExplicit {
+					matches[slug] = "inferred"
+				}
 			}
 		}
 	}

@@ -3,8 +3,10 @@ package actor
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
+	ahocorasick "github.com/BobuSumisu/aho-corasick"
 	"gopkg.in/yaml.v3"
 )
 
@@ -12,6 +14,9 @@ import (
 type Store struct {
 	profiles map[string]*ActorProfile // slug → profile
 	aliases  map[string]string        // lowercase alias/name → slug
+	trie     *ahocorasick.Trie        // multi-pattern matcher for long aliases (len ≥ minAliasLen)
+	acSlugs  []string                 // parallel to trie patterns: acSlugs[i] → slug
+	shortRe  *regexp.Regexp           // word-boundary OR-join of short aliases (len < minAliasLen)
 }
 
 // Load builds a Store from a slice of profiles (output of the MITRE client).
@@ -27,7 +32,37 @@ func Load(profiles []*ActorProfile) *Store {
 			s.aliases[strings.ToLower(a)] = p.ID
 		}
 	}
+	s.trie, s.acSlugs, s.shortRe = buildSearchStructures(s.aliases)
 	return s
+}
+
+// buildSearchStructures compiles an Aho-Corasick trie for long aliases and a
+// word-boundary regex for short ones. Both are built once at store-load time.
+func buildSearchStructures(aliases map[string]string) (*ahocorasick.Trie, []string, *regexp.Regexp) {
+	var longPatterns []string
+	var longSlugs []string
+	var shortAliases []string
+
+	for alias, slug := range aliases {
+		if len(alias) >= minAliasLen {
+			longPatterns = append(longPatterns, alias)
+			longSlugs = append(longSlugs, slug)
+		} else if alias != "" {
+			shortAliases = append(shortAliases, regexp.QuoteMeta(alias))
+		}
+	}
+
+	var trie *ahocorasick.Trie
+	if len(longPatterns) > 0 {
+		trie = ahocorasick.NewTrieBuilder().AddStrings(longPatterns).Build()
+	}
+
+	var shortRe *regexp.Regexp
+	if len(shortAliases) > 0 {
+		shortRe = regexp.MustCompile(`(?i)\b(` + strings.Join(shortAliases, `|`) + `)\b`)
+	}
+
+	return trie, longSlugs, shortRe
 }
 
 // LookupByID finds an actor profile by its canonical slug (e.g. "apt28").
