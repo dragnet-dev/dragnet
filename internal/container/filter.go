@@ -29,10 +29,10 @@ func Tier(
 	cvss float64,
 	exploitedInWild, hasPublicPoC bool,
 	affected []incident.AffectedImage,
-	popular []PopularImage,
+	idx PopularIndex,
 	cfg Config,
 ) int {
-	if !AffectsPopular(affected, popular, cfg.PopularImageThreshold) {
+	if !AffectsPopular(affected, idx, cfg.PopularImageThreshold) {
 		return 0
 	}
 	if exploitedInWild {

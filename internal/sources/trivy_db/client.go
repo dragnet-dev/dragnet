@@ -58,12 +58,12 @@ var osPrefixes = []string{
 const vulnBucket = "vulnerability"
 
 type Client struct {
-	cacheDir      string
-	popularImages []container.PopularImage
+	cacheDir   string
+	popularIdx container.PopularIndex
 }
 
 func New(cacheDir string, popularImages []container.PopularImage) *Client {
-	return &Client{cacheDir: cacheDir, popularImages: popularImages}
+	return &Client{cacheDir: cacheDir, popularIdx: container.BuildPopularIndex(popularImages)}
 }
 
 func (c *Client) Name() string { return "trivy_db" }
@@ -181,7 +181,7 @@ func (c *Client) Fetch(ctx context.Context, since time.Time) ([]*incident.Incide
 			}
 			sort.Slice(affected, func(i, j int) bool { return affected[i].Repository < affected[j].Repository })
 
-			if len(c.popularImages) > 0 && !container.AffectsPopular(affected, c.popularImages, 0) {
+			if len(c.popularIdx) > 0 && !container.AffectsPopular(affected, c.popularIdx, 0) {
 				continue
 			}
 

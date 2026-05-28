@@ -36,22 +36,31 @@ func SavePopularImages(path string, imgs []PopularImage) error {
 	return os.WriteFile(path, data, 0o644)
 }
 
+// PopularIndex is a pre-built lookup table from repository name to weekly pull count.
+// Build it once per sync cycle with BuildPopularIndex and reuse across calls.
+type PopularIndex map[string]int64
+
+// BuildPopularIndex constructs a PopularIndex from a slice of popular images.
+func BuildPopularIndex(popular []PopularImage) PopularIndex {
+	idx := make(PopularIndex, len(popular))
+	for _, p := range popular {
+		idx[p.Repository] = p.WeeklyPulls
+	}
+	return idx
+}
+
 // AffectsPopular returns true if any affected image's repository appears in
-// the popular list with weekly pulls ≥ threshold. When no popular list has
-// been configured (snapshot not yet generated), treat every image as in-scope
-// rather than silently dropping all advisories — populating the snapshot via
+// idx with weekly pulls ≥ threshold. When no popular list has been configured
+// (snapshot not yet generated), treat every image as in-scope rather than
+// silently dropping all advisories — populating the snapshot via
 // `dragnet update-popular --module container` is how users opt into strict
 // filtering.
-func AffectsPopular(affected []incident.AffectedImage, popular []PopularImage, threshold int64) bool {
-	if len(popular) == 0 {
+func AffectsPopular(affected []incident.AffectedImage, idx PopularIndex, threshold int64) bool {
+	if len(idx) == 0 {
 		return true
 	}
-	pop := make(map[string]int64, len(popular))
-	for _, p := range popular {
-		pop[p.Repository] = p.WeeklyPulls
-	}
 	for _, img := range affected {
-		if pulls, ok := pop[img.Repository]; ok && pulls >= threshold {
+		if pulls, ok := idx[img.Repository]; ok && pulls >= threshold {
 			return true
 		}
 	}

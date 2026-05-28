@@ -127,7 +127,7 @@ type SyncEngine struct {
 	explicitModule bool
 	sinceOverride  *time.Time
 	popularByEco   map[string][]popularity.PopularPackage
-	popularImages  []container.PopularImage
+	popularIdx     container.PopularIndex
 	iocExp         *ioc.Exporter
 	sigmaReg       *sigma.Registry
 	actorStore     *actor.Store
@@ -196,7 +196,7 @@ func (e *SyncEngine) loadPopularData() {
 		if err != nil {
 			log.Printf("[sync] popular images load: %v (container tier filter disabled)", err)
 		} else {
-			e.popularImages = imgs
+			e.popularIdx = container.BuildPopularIndex(imgs)
 		}
 	}
 }
@@ -411,7 +411,7 @@ func (e *SyncEngine) enrichModule(ctx context.Context, modName string, since tim
 		log.Printf("[sync][%s] enrichSupplyIncidents: done in %s", modName, time.Since(stepStart).Round(time.Second))
 	}
 	if modName == "container" {
-		incidents = enrichContainerIncidents(incidents, e.popularImages, modCfg)
+		incidents = enrichContainerIncidents(incidents, e.popularIdx, modCfg)
 	}
 	if modName == "cve" {
 		before := len(incidents)
@@ -1140,7 +1140,7 @@ func resolveModules(flag string) []string {
 // templates can reference it.
 func enrichContainerIncidents(
 	incidents []*incident.Incident,
-	popularImages []container.PopularImage,
+	popularIdx container.PopularIndex,
 	modCfg config.ModuleConfig,
 ) []*incident.Incident {
 	cfg := container.DefaultConfig()
@@ -1179,7 +1179,7 @@ func enrichContainerIncidents(
 			inc.ContainerExt.ExploitedInWild,
 			inc.ContainerExt.PublicPoC,
 			inc.ContainerExt.AffectedImages,
-			popularImages,
+			popularIdx,
 			cfg,
 		)
 		if tier == 0 {
