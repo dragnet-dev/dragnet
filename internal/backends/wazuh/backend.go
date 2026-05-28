@@ -8,6 +8,8 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/dragnet-dev/dragnet/internal/backends/sigma"
 )
 
 type Backend struct{}
@@ -167,7 +169,7 @@ func extractFields(detection map[string]interface{}) []xmlField {
 		if rawKey == "condition" {
 			continue
 		}
-		sel, ok := toStringMap(rawVal)
+		sel, ok := sigma.ToStringMap(rawVal)
 		if !ok {
 			continue
 		}
@@ -179,14 +181,10 @@ func extractFields(detection map[string]interface{}) []xmlField {
 		sort.Strings(selKeys)
 		for _, fieldKey := range selKeys {
 			fieldVal := sel[fieldKey]
-			m := fieldRe.FindStringSubmatch(fieldKey)
-			if m == nil {
-				continue
-			}
-			sigmaField, modifier := m[1], m[2]
+			sigmaField, modifier := sigma.ParseField(fieldKey)
 
 			if strings.EqualFold(sigmaField, "Hashes") {
-				for _, v := range toStringSlice(fieldVal) {
+				for _, v := range sigma.ToStringSlice(fieldVal) {
 					parts := strings.SplitN(v, "=", 2)
 					if len(parts) == 2 {
 						fields = append(fields, xmlField{
@@ -204,7 +202,7 @@ func extractFields(detection map[string]interface{}) []xmlField {
 				col = sigmaField
 			}
 
-			vals := toStringSlice(fieldVal)
+			vals := sigma.ToStringSlice(fieldVal)
 			if len(vals) == 0 {
 				continue
 			}
@@ -267,32 +265,3 @@ func deriveRuleID(sigmaID string) string {
 	return fmt.Sprintf("%d", id)
 }
 
-var fieldRe = regexp.MustCompile(`^([^|]+)(?:\|(.+))?$`)
-
-func toStringMap(v interface{}) (map[string]interface{}, bool) {
-	switch m := v.(type) {
-	case map[string]interface{}:
-		return m, true
-	case map[interface{}]interface{}:
-		out := make(map[string]interface{}, len(m))
-		for k, val := range m {
-			out[fmt.Sprintf("%v", k)] = val
-		}
-		return out, true
-	}
-	return nil, false
-}
-
-func toStringSlice(v interface{}) []string {
-	switch val := v.(type) {
-	case string:
-		return []string{val}
-	case []interface{}:
-		out := make([]string, 0, len(val))
-		for _, item := range val {
-			out = append(out, fmt.Sprintf("%v", item))
-		}
-		return out
-	}
-	return nil
-}

@@ -3,11 +3,12 @@ package datadog
 import (
 	"encoding/json"
 	"fmt"
-	"regexp"
 	"sort"
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/dragnet-dev/dragnet/internal/backends/sigma"
 )
 
 type Backend struct{}
@@ -121,7 +122,7 @@ func buildDatadogRule(rule *sigmaRule, detection map[string]interface{}) ([]byte
 		if k == "condition" {
 			continue
 		}
-		sel, ok := toStringMap(v)
+		sel, ok := sigma.ToStringMap(v)
 		if !ok {
 			continue
 		}
@@ -179,11 +180,7 @@ func buildDatadogRule(rule *sigmaRule, detection map[string]interface{}) ([]byte
 func translateSelection(sel map[string]interface{}) (string, error) {
 	var parts []string
 	for rawKey, rawVal := range sel {
-		m := fieldRe.FindStringSubmatch(rawKey)
-		if m == nil {
-			continue
-		}
-		sigmaField, modifier := m[1], m[2]
+		sigmaField, modifier := sigma.ParseField(rawKey)
 
 		if strings.EqualFold(sigmaField, "Hashes") {
 			parts = append(parts, buildHashQuery(rawVal))
@@ -194,7 +191,7 @@ func translateSelection(sel map[string]interface{}) (string, error) {
 		if col == "" {
 			col = "@" + sigmaField
 		}
-		vals := toStringSlice(rawVal)
+		vals := sigma.ToStringSlice(rawVal)
 		if len(vals) == 0 {
 			continue
 		}
@@ -249,7 +246,7 @@ func buildFieldQuery(col, modifier string, vals []string) string {
 }
 
 func buildHashQuery(rawVal interface{}) string {
-	vals := toStringSlice(rawVal)
+	vals := sigma.ToStringSlice(rawVal)
 	var preds []string
 	for _, v := range vals {
 		parts := strings.SplitN(v, "=", 2)
@@ -279,7 +276,7 @@ func buildQuery(condition string, clauses, negated map[string]string) string {
 		return strings.Join(parts, " ")
 	}
 
-	toks := condRe.FindAllString(condition, -1)
+	toks := sigma.TokenizeCondition(condition)
 	var sb strings.Builder
 	notNext := false
 	for _, tok := range toks {
@@ -313,33 +310,3 @@ func buildQuery(condition string, clauses, negated map[string]string) string {
 	return q
 }
 
-var fieldRe = regexp.MustCompile(`^([^|]+)(?:\|(.+))?$`)
-var condRe = regexp.MustCompile(`[\w_\-]+|[()]`)
-
-func toStringMap(v interface{}) (map[string]interface{}, bool) {
-	switch m := v.(type) {
-	case map[string]interface{}:
-		return m, true
-	case map[interface{}]interface{}:
-		out := make(map[string]interface{}, len(m))
-		for k, val := range m {
-			out[fmt.Sprintf("%v", k)] = val
-		}
-		return out, true
-	}
-	return nil, false
-}
-
-func toStringSlice(v interface{}) []string {
-	switch val := v.(type) {
-	case string:
-		return []string{val}
-	case []interface{}:
-		out := make([]string, 0, len(val))
-		for _, item := range val {
-			out = append(out, fmt.Sprintf("%v", item))
-		}
-		return out
-	}
-	return nil
-}

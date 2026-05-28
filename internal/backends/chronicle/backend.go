@@ -8,6 +8,8 @@ import (
 	"unicode"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/dragnet-dev/dragnet/internal/backends/sigma"
 )
 
 type Backend struct{}
@@ -106,7 +108,7 @@ func buildYARAL(rule *sigmaRule, detection map[string]interface{}) (string, erro
 		if k == "condition" {
 			continue
 		}
-		sel, ok := toStringMap(v)
+		sel, ok := sigma.ToStringMap(v)
 		if !ok {
 			continue
 		}
@@ -159,11 +161,7 @@ func buildYARAL(rule *sigmaRule, detection map[string]interface{}) (string, erro
 func translateSelection(sel map[string]interface{}) (string, error) {
 	var parts []string
 	for rawKey, rawVal := range sel {
-		m := fieldRe.FindStringSubmatch(rawKey)
-		if m == nil {
-			continue
-		}
-		sigmaField, modifier := m[1], m[2]
+		sigmaField, modifier := sigma.ParseField(rawKey)
 
 		if strings.EqualFold(sigmaField, "Hashes") {
 			parts = append(parts, buildHashExpr(rawVal))
@@ -174,7 +172,7 @@ func translateSelection(sel map[string]interface{}) (string, error) {
 		if udmField == "" {
 			udmField = "$e." + sigmaField
 		}
-		vals := toStringSlice(rawVal)
+		vals := sigma.ToStringSlice(rawVal)
 		if len(vals) == 0 {
 			continue
 		}
@@ -227,7 +225,7 @@ func buildFieldExpr(udmField, modifier string, vals []string) string {
 }
 
 func buildHashExpr(rawVal interface{}) string {
-	vals := toStringSlice(rawVal)
+	vals := sigma.ToStringSlice(rawVal)
 	var preds []string
 	for _, v := range vals {
 		parts := strings.SplitN(v, "=", 2)
@@ -268,7 +266,7 @@ func buildConditionExprs(condition string, clauses map[string]string) []string {
 	}
 
 	// Simple approach: collect positive selections, skip negated ones.
-	toks := condRe.FindAllString(condition, -1)
+	toks := sigma.TokenizeCondition(condition)
 	var positive []string
 	skip := false
 	for i, tok := range toks {
@@ -324,33 +322,3 @@ func regexEscape(s string) string {
 	return regexp.QuoteMeta(s)
 }
 
-var fieldRe = regexp.MustCompile(`^([^|]+)(?:\|(.+))?$`)
-var condRe = regexp.MustCompile(`[\w_\-]+|[()]`)
-
-func toStringMap(v interface{}) (map[string]interface{}, bool) {
-	switch m := v.(type) {
-	case map[string]interface{}:
-		return m, true
-	case map[interface{}]interface{}:
-		out := make(map[string]interface{}, len(m))
-		for k, val := range m {
-			out[fmt.Sprintf("%v", k)] = val
-		}
-		return out, true
-	}
-	return nil, false
-}
-
-func toStringSlice(v interface{}) []string {
-	switch val := v.(type) {
-	case string:
-		return []string{val}
-	case []interface{}:
-		out := make([]string, 0, len(val))
-		for _, item := range val {
-			out = append(out, fmt.Sprintf("%v", item))
-		}
-		return out
-	}
-	return nil
-}

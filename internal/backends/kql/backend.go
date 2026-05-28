@@ -2,11 +2,12 @@ package kql
 
 import (
 	"fmt"
-	"regexp"
 	"sort"
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/dragnet-dev/dragnet/internal/backends/sigma"
 )
 
 // Backend compiles Sigma rules to KQL for Microsoft Sentinel / MDE.
@@ -91,7 +92,7 @@ func buildKQL(rule *sigmaRule, rawDetection map[string]interface{}) (string, err
 		if key == "condition" {
 			continue
 		}
-		selMap, ok := toStringMap(val)
+		selMap, ok := sigma.ToStringMap(val)
 		if !ok {
 			continue
 		}
@@ -128,36 +129,13 @@ func buildKQL(rule *sigmaRule, rawDetection map[string]interface{}) (string, err
 	return sb.String(), nil
 }
 
-// toStringMap coerces a yaml-decoded value to map[string]interface{}.
-func toStringMap(v interface{}) (map[string]interface{}, bool) {
-	switch m := v.(type) {
-	case map[string]interface{}:
-		return m, true
-	case map[interface{}]interface{}:
-		out := make(map[string]interface{}, len(m))
-		for k, val := range m {
-			out[fmt.Sprintf("%v", k)] = val
-		}
-		return out, true
-	}
-	return nil, false
-}
-
-// fieldModifierRe splits "FieldName|modifier" or just "FieldName".
-var fieldModifierRe = regexp.MustCompile(`^([^|]+)(?:\|(.+))?$`)
-
 // translateSelection converts a Sigma selection block into a KQL boolean expression.
 // Multiple field entries within a selection are ANDed together.
 func translateSelection(sel map[string]interface{}) (string, error) {
 	parts := make([]string, 0, len(sel))
 
 	for rawKey, rawVal := range sel {
-		m := fieldModifierRe.FindStringSubmatch(rawKey)
-		if m == nil {
-			continue
-		}
-		sigmaField := m[1]
-		modifier := m[2] // may be empty
+		sigmaField, modifier := sigma.ParseField(rawKey)
 
 		kqlCol := fieldMap[sigmaField]
 		if kqlCol == "" {
@@ -192,7 +170,7 @@ func buildFieldExpr(kqlCol, sigmaField, modifier string, rawVal interface{}) (st
 		return buildHashExpr(rawVal)
 	}
 
-	values := toStringSlice(rawVal)
+	values := sigma.ToStringSlice(rawVal)
 	if len(values) == 0 {
 		return "true", nil
 	}
@@ -230,7 +208,7 @@ func buildFieldExpr(kqlCol, sigmaField, modifier string, rawVal interface{}) (st
 
 // buildHashExpr handles the Sigma Hashes field (e.g. "SHA256=abc123...").
 func buildHashExpr(rawVal interface{}) (string, error) {
-	values := toStringSlice(rawVal)
+	values := sigma.ToStringSlice(rawVal)
 	if len(values) == 0 {
 		return "true", nil
 	}
@@ -302,7 +280,7 @@ func buildCondition(condition string, clauses map[string]string) string {
 	}
 
 	// Tokenise the condition: words (selection names), "or", "and", "not", parens.
-	tokens := tokeniseCondition(condition)
+	tokens := sigma.TokenizeCondition(condition)
 	var sb strings.Builder
 	for i, tok := range tokens {
 		switch strings.ToLower(tok) {
@@ -331,29 +309,6 @@ func buildCondition(condition string, clauses map[string]string) string {
 		}
 	}
 	return sb.String()
-}
-
-var condTokenRe = regexp.MustCompile(`[\w_\-]+|[()]`)
-
-func tokeniseCondition(condition string) []string {
-	return condTokenRe.FindAllString(condition, -1)
-}
-
-// toStringSlice normalises a yaml-decoded value to []string.
-func toStringSlice(v interface{}) []string {
-	switch val := v.(type) {
-	case string:
-		return []string{val}
-	case []interface{}:
-		out := make([]string, 0, len(val))
-		for _, item := range val {
-			out = append(out, fmt.Sprintf("%v", item))
-		}
-		return out
-	case int, int64, float64:
-		return []string{fmt.Sprintf("%v", val)}
-	}
-	return nil
 }
 
 // quoteList returns comma-separated double-quoted values suitable for KQL list literals.

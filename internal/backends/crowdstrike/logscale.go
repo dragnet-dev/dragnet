@@ -2,11 +2,12 @@ package crowdstrike
 
 import (
 	"fmt"
-	"regexp"
 	"sort"
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/dragnet-dev/dragnet/internal/backends/sigma"
 )
 
 // LogScaleBackend compiles Sigma rules to CrowdStrike NG-SIEM (LogScale) queries.
@@ -86,7 +87,7 @@ func buildLogScale(rule *lsRule, detection map[string]interface{}) (string, erro
 	negated := map[string]bool{}
 
 	// Detect negated selections in condition string.
-	toks := lsCondRe.FindAllString(condition, -1)
+	toks := sigma.TokenizeCondition(condition)
 	for i, tok := range toks {
 		if strings.ToLower(tok) == "not" && i+1 < len(toks) {
 			negated[toks[i+1]] = true
@@ -97,7 +98,7 @@ func buildLogScale(rule *lsRule, detection map[string]interface{}) (string, erro
 		if k == "condition" {
 			continue
 		}
-		sel, ok := toStringMapLS(v)
+		sel, ok := sigma.ToStringMap(v)
 		if !ok {
 			continue
 		}
@@ -143,11 +144,7 @@ func lsProjectFields(category string) string {
 func translateSelectionLS(sel map[string]interface{}) (string, error) {
 	var parts []string
 	for rawKey, rawVal := range sel {
-		m := lsFieldRe.FindStringSubmatch(rawKey)
-		if m == nil {
-			continue
-		}
-		sigmaField, modifier := m[1], m[2]
+		sigmaField, modifier := sigma.ParseField(rawKey)
 
 		if strings.EqualFold(sigmaField, "Hashes") {
 			parts = append(parts, buildHashExprLS(rawVal))
@@ -158,7 +155,7 @@ func translateSelectionLS(sel map[string]interface{}) (string, error) {
 		if col == "" {
 			col = sigmaField
 		}
-		vals := toStringSliceLS(rawVal)
+		vals := sigma.ToStringSlice(rawVal)
 		if len(vals) == 0 {
 			continue
 		}
@@ -213,7 +210,7 @@ func buildFieldExprLS(col, modifier string, vals []string) string {
 }
 
 func buildHashExprLS(rawVal interface{}) string {
-	vals := toStringSliceLS(rawVal)
+	vals := sigma.ToStringSlice(rawVal)
 	var preds []string
 	for _, v := range vals {
 		parts := strings.SplitN(v, "=", 2)
@@ -248,7 +245,7 @@ func buildConditionLS(condition string, clauses map[string]string, negated map[s
 		}
 		return ""
 	}
-	toks := lsCondRe.FindAllString(condition, -1)
+	toks := sigma.TokenizeCondition(condition)
 	var sb strings.Builder
 	skipNext := false
 	for i, tok := range toks {
@@ -283,33 +280,3 @@ func buildConditionLS(condition string, clauses map[string]string, negated map[s
 	return sb.String()
 }
 
-var lsFieldRe = regexp.MustCompile(`^([^|]+)(?:\|(.+))?$`)
-var lsCondRe = regexp.MustCompile(`[\w_\-]+|[()]`)
-
-func toStringMapLS(v interface{}) (map[string]interface{}, bool) {
-	switch m := v.(type) {
-	case map[string]interface{}:
-		return m, true
-	case map[interface{}]interface{}:
-		out := make(map[string]interface{}, len(m))
-		for k, val := range m {
-			out[fmt.Sprintf("%v", k)] = val
-		}
-		return out, true
-	}
-	return nil, false
-}
-
-func toStringSliceLS(v interface{}) []string {
-	switch val := v.(type) {
-	case string:
-		return []string{val}
-	case []interface{}:
-		out := make([]string, 0, len(val))
-		for _, item := range val {
-			out = append(out, fmt.Sprintf("%v", item))
-		}
-		return out
-	}
-	return nil
-}

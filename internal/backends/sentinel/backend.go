@@ -7,6 +7,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/dragnet-dev/dragnet/internal/backends/kql"
+	"github.com/dragnet-dev/dragnet/internal/backends/sigma"
 )
 
 // Backend produces Sentinel-native YAML (ARM-compatible, GitHub connector ready).
@@ -67,7 +68,7 @@ func extractMeta(doc map[string]interface{}) ruleMeta {
 	r.name, _ = doc["title"].(string)
 	r.description, _ = doc["description"].(string)
 	r.level, _ = doc["level"].(string)
-	r.tags = toStringSlice(doc["tags"])
+	r.tags = sigma.ToStringSlice(doc["tags"])
 
 	if ls, ok := doc["logsource"].(map[string]interface{}); ok {
 		r.category, _ = ls["category"].(string)
@@ -235,20 +236,3 @@ func buildSentinelYAML(
 	return out, nil
 }
 
-// toStringSlice coerces an interface{} to []string.
-func toStringSlice(v interface{}) []string {
-	if v == nil {
-		return nil
-	}
-	switch val := v.(type) {
-	case []interface{}:
-		out := make([]string, 0, len(val))
-		for _, item := range val {
-			out = append(out, fmt.Sprintf("%v", item))
-		}
-		return out
-	case string:
-		return []string{val}
-	}
-	return nil
-}
