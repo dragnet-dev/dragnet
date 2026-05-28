@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -145,13 +146,21 @@ func (c *Client) Probe(ctx context.Context, maxArticles int) ProbeResult {
 	return r
 }
 
+// blogFetchConcurrency is the maximum number of article HTML fetches in flight
+// at once per blog source. Bounded to avoid overwhelming CDN rate limits.
+const blogFetchConcurrency = 5
+
 func (c *Client) Fetch(ctx context.Context, since time.Time) ([]*incident.Incident, error) {
 	feed, err := c.fetchFeed(ctx, c.parser.FeedURL())
 	if err != nil {
 		return nil, fmt.Errorf("fetch rss %s: %w", c.parser.FeedURL(), err)
 	}
 
-	var incidents []*incident.Incident
+	// Filter items before dispatching goroutines.
+	type candidate struct {
+		item *gofeed.Item
+	}
+	var candidates []candidate
 	for _, item := range feed.Items {
 		if item.PublishedParsed != nil && item.PublishedParsed.Before(since) {
 			continue
@@ -163,28 +172,46 @@ func (c *Client) Fetch(ctx context.Context, since time.Time) ([]*incident.Incide
 		if !c.parser.MatchesPost(item.Title, desc) {
 			continue
 		}
-
-		html, err := c.fetchHTML(ctx, item.Link)
-		if err != nil {
-			log.Printf("[%s] fetch html %s: %v", c.parser.Name(), item.Link, err)
-			continue
-		}
-
-		iocs, pkgs, err := c.parser.ParseIOCs(html)
-		if err != nil {
-			log.Printf("[%s] parse iocs %s: %v", c.parser.Name(), item.Link, err)
-			continue
-		}
-		// Supplement parser-returned packages with generic extraction so that
-		// merging on packageOverlap works even when parsers don't detect them.
-		pkgs = mergePackages(pkgs, ExtractPackages(html))
-		if len(iocs) == 0 && len(pkgs) == 0 {
-			continue
-		}
-
-		inc := iocsToDraftIncident(c.parser.Name(), item.Link, item.Title, item.PublishedParsed, iocs, pkgs)
-		incidents = append(incidents, inc)
+		candidates = append(candidates, candidate{item: item})
 	}
+
+	sem := make(chan struct{}, blogFetchConcurrency)
+	var mu sync.Mutex
+	var incidents []*incident.Incident
+	var wg sync.WaitGroup
+
+	for _, cand := range candidates {
+		cand := cand
+		wg.Add(1)
+		sem <- struct{}{}
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+
+			html, err := c.fetchHTML(ctx, cand.item.Link)
+			if err != nil {
+				log.Printf("[%s] fetch html %s: %v", c.parser.Name(), cand.item.Link, err)
+				return
+			}
+			iocs, pkgs, err := c.parser.ParseIOCs(html)
+			if err != nil {
+				log.Printf("[%s] parse iocs %s: %v", c.parser.Name(), cand.item.Link, err)
+				return
+			}
+			// Supplement parser-returned packages with generic extraction so that
+			// merging on packageOverlap works even when parsers don't detect them.
+			pkgs = mergePackages(pkgs, ExtractPackages(html))
+			if len(iocs) == 0 && len(pkgs) == 0 {
+				return
+			}
+			inc := iocsToDraftIncident(c.parser.Name(), cand.item.Link, cand.item.Title, cand.item.PublishedParsed, iocs, pkgs)
+			mu.Lock()
+			incidents = append(incidents, inc)
+			mu.Unlock()
+		}()
+	}
+
+	wg.Wait()
 	return incidents, nil
 }
 

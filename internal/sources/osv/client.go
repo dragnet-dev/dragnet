@@ -8,12 +8,16 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	urlpkg "net/url"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
+
+	"golang.org/x/sync/errgroup"
 
 	"github.com/dragnet-dev/dragnet/internal/incident"
 )
@@ -115,23 +119,30 @@ func (c *Client) Fetch(ctx context.Context, since time.Time) ([]*incident.Incide
 	return c.fetchBulk(ctx, since)
 }
 
-// fetchBulk downloads each ecosystem's all.zip, parses every advisory, and
-// returns those modified at or after since.
+// fetchBulk downloads each ecosystem's all.zip concurrently and returns
+// advisories modified at or after since. Per-ecosystem errors are logged and
+// skipped so a single unavailable ecosystem doesn't abort the full sync.
 func (c *Client) fetchBulk(ctx context.Context, since time.Time) ([]*incident.Incident, error) {
+	var mu sync.Mutex
 	var all []*incident.Incident
+
+	g, gctx := errgroup.WithContext(ctx)
 	for _, eco := range bulkEcosystems {
-		if err := ctx.Err(); err != nil {
-			return all, err
-		}
-		incs, err := c.fetchEcosystem(ctx, eco, since)
-		if err != nil {
-			log.Printf("[osv] bulk %s: %v (skipping)", eco, err)
-			continue
-		}
-		log.Printf("[osv] bulk %s: %d advisories since %s", eco, len(incs), since.Format(time.RFC3339))
-		all = append(all, incs...)
+		eco := eco
+		g.Go(func() error {
+			incs, err := c.fetchEcosystem(gctx, eco, since)
+			if err != nil {
+				log.Printf("[osv] bulk %s: %v (skipping)", eco, err)
+				return nil // non-fatal: skip this ecosystem
+			}
+			log.Printf("[osv] bulk %s: %d advisories since %s", eco, len(incs), since.Format(time.RFC3339))
+			mu.Lock()
+			all = append(all, incs...)
+			mu.Unlock()
+			return nil
+		})
 	}
-	return all, nil
+	return all, g.Wait()
 }
 
 // fetchEcosystem downloads and parses the all.zip for a single OSV ecosystem.
@@ -465,20 +476,82 @@ func osvSeverity(adv *osvAdvisory) string {
 	return "low"
 }
 
-// cvssBaseScore extracts the numeric base score from a CVSS vector string.
-// OSV encodes it as the full vector, e.g. "CVSS:3.1/AV:N/.../E:...".
-// We scan the vector for the base score stored in the "CVSS:X.Y/<components>"
-// format — for CVSS v3 the base score is encoded separately; OSV sometimes
-// places just the score as the Score field instead of the vector.
+// cvssBaseScore extracts the numeric CVSS base score from either a plain float
+// string ("7.5") or a full CVSS v3.x vector string ("CVSS:3.1/AV:N/AC:L/...").
+// OSV frequently returns vectors rather than pre-computed scores; computing the
+// base score from the vector prevents critical advisories from being ranked as 0.
 func cvssBaseScore(scoreOrVector string) float64 {
-	// If it's a plain float, parse directly.
 	f, err := strconv.ParseFloat(strings.TrimSpace(scoreOrVector), 64)
 	if err == nil {
 		return f
 	}
-	// Otherwise try to extract from a vector string like "CVSS:3.1/..."
-	// The vector itself doesn't contain the base score numerically; callers
-	// that embed vectors without a separate score field are not common in OSV
-	// for malware advisories, so default to "low".
+	if strings.HasPrefix(scoreOrVector, "CVSS:") {
+		return parseCVSSv3BaseScore(scoreOrVector)
+	}
 	return 0
+}
+
+// parseCVSSv3BaseScore implements the CVSS v3.1 base score formula from a
+// vector string. Returns 0 if the vector cannot be parsed.
+// Spec: https://www.first.org/cvss/v3.1/specification-document §7.1-7.3
+func parseCVSSv3BaseScore(vector string) float64 {
+	// Strip version prefix ("CVSS:3.1/") and build a metric map.
+	slash := strings.Index(vector, "/")
+	if slash < 0 {
+		return 0
+	}
+	metrics := map[string]string{}
+	for _, part := range strings.Split(vector[slash+1:], "/") {
+		kv := strings.SplitN(part, ":", 2)
+		if len(kv) == 2 {
+			metrics[kv[0]] = kv[1]
+		}
+	}
+
+	// Numeric lookup tables per CVSS v3.1 spec Table 14.
+	av := map[string]float64{"N": 0.85, "A": 0.62, "L": 0.55, "P": 0.2}
+	ac := map[string]float64{"L": 0.77, "H": 0.44}
+	pr := map[string]float64{"N": 0.85, "L": 0.62, "H": 0.27}
+	// PR values differ when Scope is Changed.
+	prChanged := map[string]float64{"N": 0.85, "L": 0.68, "H": 0.50}
+	ui := map[string]float64{"N": 0.85, "R": 0.62}
+	cia := map[string]float64{"N": 0.00, "L": 0.22, "H": 0.56}
+
+	scope := metrics["S"]
+	avVal, avOK := av[metrics["AV"]]
+	acVal, acOK := ac[metrics["AC"]]
+	uiVal, uiOK := ui[metrics["UI"]]
+	cVal, cOK := cia[metrics["C"]]
+	iVal, iOK := cia[metrics["I"]]
+	aVal, aOK := cia[metrics["A"]]
+
+	var prVal float64
+	var prOK bool
+	if scope == "C" {
+		prVal, prOK = prChanged[metrics["PR"]]
+	} else {
+		prVal, prOK = pr[metrics["PR"]]
+	}
+
+	if !avOK || !acOK || !prOK || !uiOK || !cOK || !iOK || !aOK {
+		return 0
+	}
+
+	iss := 1 - (1-cVal)*(1-iVal)*(1-aVal)
+	var impact float64
+	if scope == "C" {
+		impact = 7.52*(iss-0.029) - 3.25*math.Pow(iss-0.02, 15)
+	} else {
+		impact = 6.42 * iss
+	}
+	if impact <= 0 {
+		return 0
+	}
+	exploitability := 8.22 * avVal * acVal * prVal * uiVal
+	base := impact + exploitability
+	if base > 10 {
+		base = 10
+	}
+	// CVSS roundup: ceiling to one decimal place.
+	return math.Ceil(base*10) / 10
 }

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"text/template" //nolint:gosec // nosemgrep: go.lang.security.audit.xss.import-text-template.import-text-template -- generating YAML, not HTML; html/template would corrupt template syntax
 	"time"
 
@@ -76,6 +77,10 @@ type Generator struct {
 func New(outputDir, module string, registry *Registry) *Generator {
 	return &Generator{OutputDir: outputDir, Module: module, Registry: registry}
 }
+
+// templateCache stores parsed templates keyed by embedded FS path to avoid
+// re-parsing on every rule write during bulk syncs.
+var templateCache sync.Map // map[string]*template.Template
 
 // templateFuncs is the FuncMap available in every template.
 var templateFuncs = template.FuncMap{
@@ -150,8 +155,12 @@ var templateFuncs = template.FuncMap{
 	},
 }
 
-// loadTemplate parses a template from the embedded FS.
+// loadTemplate parses a template from the embedded FS, caching the result so
+// subsequent calls for the same path return the already-parsed *template.Template.
 func loadTemplate(path string) (*template.Template, error) {
+	if v, ok := templateCache.Load(path); ok {
+		return v.(*template.Template), nil
+	}
 	content, err := templateFS.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("reading template %s: %w", path, err)
@@ -160,7 +169,8 @@ func loadTemplate(path string) (*template.Template, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parsing template %s: %w", path, err)
 	}
-	return tmpl, nil
+	actual, _ := templateCache.LoadOrStore(path, tmpl)
+	return actual.(*template.Template), nil
 }
 
 // render executes a template and returns the result as a string.

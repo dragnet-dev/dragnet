@@ -117,69 +117,679 @@ var backfillSkip = map[string]bool{
 	"go_modules": true, "hex": true, "packagist": true, "pub": true,
 }
 
-func runSync(_ *cobra.Command, _ []string) error {
+// SyncEngine holds the shared state that flows between phases of a sync run.
+// runSync constructs one, initializes it, then calls phase methods in order.
+type SyncEngine struct {
+	cfg            *config.Config
+	stateMgr       *state.Manager
+	st             *state.State
+	moduleNames    []string
+	explicitModule bool
+	sinceOverride  *time.Time
+	popularByEco   map[string][]popularity.PopularPackage
+	popularImages  []container.PopularImage
+	iocExp         *ioc.Exporter
+	sigmaReg       *sigma.Registry
+	actorStore     *actor.Store
+	// Built up during per-module phases.
+	moduleIncidents   map[string][]*incident.Incident
+	moduleFetchErrors map[string]int32
+	moduleDrafts      map[string][]*incident.Incident
+}
+
+func newSyncEngine() *SyncEngine {
+	return &SyncEngine{
+		moduleIncidents:   make(map[string][]*incident.Incident),
+		moduleFetchErrors: make(map[string]int32),
+		moduleDrafts:      make(map[string][]*incident.Incident),
+	}
+}
+
+// loadConfig parses dragnet.yaml, resolves CLI flags, and loads sync state.
+func (e *SyncEngine) loadConfig() error {
 	cfg, err := config.Load(cfgFile)
 	if err != nil {
 		return err
 	}
+	e.cfg = cfg
+	e.moduleNames = resolveModules(syncModule)
+	e.explicitModule = syncModule != "all"
 
-	moduleNames := resolveModules(syncModule)
-	explicitModule := syncModule != "all"
-
-	stateMgr := state.New()
-	st, err := stateMgr.Load(filepath.Join(dataDir(), "state/last_sync.json"))
+	e.stateMgr = state.New()
+	st, err := e.stateMgr.Load(filepath.Join(dataDir(), "state/last_sync.json"))
 	if err != nil {
 		return err
 	}
+	e.st = st
 
-	// Parse --since override once (applies to all modules when set).
-	var sinceOverride *time.Time
 	if syncSince != "" {
 		t, err := time.Parse(time.RFC3339, syncSince)
 		if err != nil {
 			return err
 		}
-		sinceOverride = &t
+		e.sinceOverride = &t
 	}
-	if syncBackfill && sinceOverride == nil {
+	if syncBackfill && e.sinceOverride == nil {
 		t := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
-		sinceOverride = &t
+		e.sinceOverride = &t
 		log.Printf("[backfill] since defaulting to %s", t.Format(time.RFC3339))
 	}
+	return nil
+}
 
-	// Load popular packages for typosquat detection (supply module).
-	popularByEco := map[string][]popularity.PopularPackage{}
-	if modCfg, ok := cfg.Modules["supply"]; ok {
+// loadPopularData loads popular packages for typosquat detection and popular
+// container images for container tier filtering.
+func (e *SyncEngine) loadPopularData() {
+	e.popularByEco = make(map[string][]popularity.PopularPackage)
+	if modCfg, ok := e.cfg.Modules["supply"]; ok {
 		for _, eco := range modCfg.Ecosystems {
 			pkgs, err := popularity.LoadPopularList(filepath.Join(dataDir(), "state/popular_packages"), eco)
 			if err != nil {
 				log.Printf("[sync] popular list %s: %v (typosquat detection disabled for this ecosystem)", eco, err)
 				continue
 			}
-			popularByEco[eco] = pkgs
+			e.popularByEco[eco] = pkgs
 		}
 	}
-
-	// Load popular images for container tier filtering.
-	var popularImages []container.PopularImage
 	if imagesPath := filepath.Join(dataDir(), "state/popular_images.json"); fileExists(imagesPath) {
 		imgs, err := container.LoadPopularImages(imagesPath)
 		if err != nil {
 			log.Printf("[sync] popular images load: %v (container tier filter disabled)", err)
 		} else {
-			popularImages = imgs
+			e.popularImages = imgs
+		}
+	}
+}
+
+// initRegistries initializes the IOC exporter, sigma ID registry, and ATT&CK actor store.
+func (e *SyncEngine) initRegistries(ctx context.Context) error {
+	e.iocExp = ioc.New()
+
+	// Load the shared Dragnet ID registry up front so we can assign canonical
+	// dragnet-{module}-{year}-{seq} IDs at ingest time, not at sigma-gen time.
+	sigmaReg, regErr := sigma.LoadRegistry(filepath.Join(dataDir(), "state/sigma-id-registry.json"))
+	if regErr != nil {
+		log.Printf("[sync] sigma registry load failed (starting fresh): %v", regErr)
+		sigmaReg, _ = sigma.LoadRegistry("/dev/null")
+	}
+	e.sigmaReg = sigmaReg
+
+	// Seed supply-chain actor profiles to disk (no-op if already present).
+	if err := actor.SeedProfiles(filepath.Join(dataDir(), "actors/profiles")); err != nil {
+		log.Printf("[sync] actor seed: %v", err)
+	}
+
+	// ATT&CK actor store — fetched once, ETag-cached, used by all modules.
+	actorStore, newMITREETag := loadActorStore(ctx, e.st.MITREETag)
+	if newMITREETag != "" {
+		e.st.MITREETag = newMITREETag
+	}
+	if actorStore != nil {
+		actor.ApplySeeds(actorStore)
+		stix.SetActorStore(actorStore)
+	}
+	e.actorStore = actorStore
+	return nil
+}
+
+// sinceFor returns the since timestamp for a module.
+// Priority: explicit --since > per-module cursor > zero (first-run bulk).
+// Deliberately does NOT fall back to st.LastSync — cross-module cursor
+// inheritance caused supply→malware silent-zero on first runs.
+func (e *SyncEngine) sinceFor(modName string) time.Time {
+	if e.sinceOverride != nil {
+		return *e.sinceOverride
+	}
+	if src := e.st.Sources[modName]; src.LastSync != nil {
+		return *src.LastSync
+	}
+	return time.Time{}
+}
+
+// fetchModule runs the semaphore-bounded parallel source fetch for one module.
+// Returns collected incidents and a count of source errors.
+func (e *SyncEngine) fetchModule(ctx context.Context, modName string, modCfg config.ModuleConfig, since time.Time) ([]*incident.Incident, int32, error) {
+	var srcs []sources.Source
+	switch {
+	case syncSources == "all":
+		srcs = sources.All()
+	case syncSources != "":
+		var err error
+		srcs, err = sources.ByName(strings.Split(syncSources, ","))
+		if err != nil {
+			return nil, 0, err
+		}
+	default:
+		var err error
+		srcs, err = sources.ForModule(modCfg.Sources)
+		if err != nil {
+			return nil, 0, err
+		}
+	}
+	if syncBackfill {
+		var filtered []sources.Source
+		for _, s := range srcs {
+			if !backfillSkip[s.Name()] {
+				filtered = append(filtered, s)
+			}
+		}
+		srcs = filtered
+	}
+
+	var (
+		mu            sync.Mutex
+		incidents     []*incident.Incident
+		fetchErrCount int32
+		wg            sync.WaitGroup
+		pending       sync.Map // src.Name() -> startTime for any source still running
+		// Per-source results captured so we can print a single-line health
+		// summary at the end of the module. Without it, silent failures
+		// (source returns 0 with no error) are buried in 100s of log lines.
+		srcStats sync.Map // src.Name() -> srcResult
+	)
+	sem := make(chan struct{}, 10)
+	for _, src := range srcs {
+		wg.Add(1)
+		go func(s sources.Source) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			start := time.Now()
+			pending.Store(s.Name(), start)
+			defer pending.Delete(s.Name())
+			log.Printf("[sync][%s] fetching %s since %s", modName, s.Name(), since.Format(time.RFC3339))
+			fetchCtx, fetchCancel := context.WithTimeout(ctx, perSourceFetchTimeout)
+			got, err := s.Fetch(fetchCtx, since)
+			fetchCancel()
+			dur := time.Since(start).Round(time.Millisecond)
+			if err != nil {
+				log.Printf("[sync][%s] %s: %v (skipping after %s)", modName, s.Name(), err, dur)
+				atomic.AddInt32(&fetchErrCount, 1)
+				srcStats.Store(s.Name(), srcResult{count: 0, err: err.Error()})
+				return
+			}
+			log.Printf("[sync][%s] %s: fetched %d incidents in %s", modName, s.Name(), len(got), dur)
+			srcStats.Store(s.Name(), srcResult{count: len(got)})
+			for _, inc := range got {
+				if inc.Source == "" {
+					inc.Source = s.Name()
+				}
+			}
+			mu.Lock()
+			incidents = append(incidents, got...)
+			mu.Unlock()
+		}(src)
+	}
+
+	// Wait for fetches with three layers of safety:
+	//   1. heartbeat — log every 30s which sources are still running so a
+	//      stuck run is visible from CI logs immediately, not on cancel.
+	//   2. allSourcesDeadline — bail out at 5min, abandon stuck goroutines.
+	//   3. hardWallClockBudget watchdog (separate goroutine started above)
+	//      os.Exit()s the whole binary at 20min, regardless.
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	heartbeat := time.NewTicker(fetchHeartbeatInterval)
+	deadline := time.After(allSourcesDeadline)
+waitLoop:
+	for {
+		select {
+		case <-done:
+			heartbeat.Stop()
+			break waitLoop
+		case <-deadline:
+			heartbeat.Stop()
+			var stuck []string
+			now := time.Now()
+			pending.Range(func(k, v any) bool {
+				stuck = append(stuck, fmt.Sprintf("%s(%s)", k.(string), now.Sub(v.(time.Time)).Round(time.Second)))
+				return true
+			})
+			log.Printf("[sync][%s] hit %s deadline; abandoning %d source(s) still running: %s",
+				modName, allSourcesDeadline, len(stuck), strings.Join(stuck, ", "))
+			atomic.AddInt32(&fetchErrCount, int32(len(stuck)))
+			break waitLoop
+		case <-heartbeat.C:
+			var pendingNames []string
+			now := time.Now()
+			pending.Range(func(k, v any) bool {
+				pendingNames = append(pendingNames, fmt.Sprintf("%s(%s)", k.(string), now.Sub(v.(time.Time)).Round(time.Second)))
+				return true
+			})
+			log.Printf("[sync][%s] heartbeat: %d source(s) still running: %s",
+				modName, len(pendingNames), strings.Join(pendingNames, ", "))
 		}
 	}
 
-	// Graceful cancellation on SIGINT.
+	logSourceHealth(modName, &srcStats)
+	return incidents, atomic.LoadInt32(&fetchErrCount), nil
+}
+
+// enrichModule applies all module-specific enrichment passes in order.
+func (e *SyncEngine) enrichModule(ctx context.Context, modName string, since time.Time, modCfg config.ModuleConfig, incidents []*incident.Incident) []*incident.Incident {
+	// OSV package enrichment for the supply module.
+	//
+	// IMPORTANT: skip when the bulk OSV path was taken (since > 7 days).
+	// Bulk export already returned every OSV advisory; enriching would
+	// then issue thousands of additional /querybatch HTTP calls in series
+	// for duplicate data and burn 5-20+ minutes silently. The bulk cutoff
+	// here mirrors osv.bulkCutoff inside the OSV client.
+	const osvBulkCutoff = 7 * 24 * time.Hour
+	if modName == "supply" && time.Since(since) <= osvBulkCutoff {
+		var pkgsToEnrich []incident.Package
+		seen := map[string]bool{}
+		for _, inc := range incidents {
+			for _, pkg := range inc.Packages {
+				key := pkg.Ecosystem + "/" + pkg.Name + "@" + strings.Join(pkg.AffectedVersions, ",")
+				if !seen[key] {
+					seen[key] = true
+					pkgsToEnrich = append(pkgsToEnrich, pkg)
+				}
+			}
+		}
+		if len(pkgsToEnrich) > 0 {
+			log.Printf("[sync][%s] osv enrich: starting with %d unique packages", modName, len(pkgsToEnrich))
+			osvClient := osv.New()
+			enrichStart := time.Now()
+			enriched, err := osvClient.EnrichPackages(ctx, pkgsToEnrich)
+			if err != nil {
+				log.Printf("[sync][%s] osv enrich: %v (skipping after %s)", modName, err, time.Since(enrichStart).Round(time.Second))
+			} else if len(enriched) > 0 {
+				log.Printf("[sync][%s] osv enrich: %d additional advisories in %s", modName, len(enriched), time.Since(enrichStart).Round(time.Second))
+				incidents = append(incidents, enriched...)
+			}
+		}
+	} else if modName == "supply" {
+		log.Printf("[sync][%s] osv enrich: skipped (bulk fetch already included full advisory set)", modName)
+	}
+
+	// Supply enrichment is local-only (typosquat detection + impact scoring).
+	if modName == "supply" {
+		log.Printf("[sync][%s] enrichSupplyIncidents: %d incidents", modName, len(incidents))
+		stepStart := time.Now()
+		incidents = enrichSupplyIncidents(ctx, incidents, e.popularByEco)
+		log.Printf("[sync][%s] enrichSupplyIncidents: done in %s", modName, time.Since(stepStart).Round(time.Second))
+	}
+	if modName == "container" {
+		incidents = enrichContainerIncidents(incidents, e.popularImages, modCfg)
+	}
+	if modName == "cve" {
+		before := len(incidents)
+		incidents = filterCVEByQuality(incidents)
+		log.Printf("[sync][%s] CVE quality filter: %d -> %d (kept KEV / CVSS>=9 / public PoC)", modName, before, len(incidents))
+	}
+	if modName == "os-packages" {
+		before := len(incidents)
+		incidents = filterOSPackages(incidents, filepath.Join(dataDir(), "state"))
+		log.Printf("[sync][%s] OS package filter: %d -> %d (high/critical, fix or KEV)", modName, before, len(incidents))
+	}
+	return incidents
+}
+
+// mergeAndPersistModule loads prior on-disk state, merges with new incidents,
+// assigns canonical IDs, attributes actors, and writes the authoritative haul data.
+func (e *SyncEngine) mergeAndPersistModule(modName string, modCfg config.ModuleConfig, incidents []*incident.Incident, fetchErrCount int32) {
+	// Load whatever is already on disk and fold it into the fetched set
+	// before MergeAll. Without this, each cycle's persist call wipes any
+	// incident that wasn't refreshed within the current `since` window —
+	// supply collapsed from 264k → 0 and ransomware from 30k → 3 in a
+	// single cron tick because most sources legitimately return nothing
+	// new in 6 hours. MergeAll is union-find dedupe so re-feeding the
+	// prior set is idempotent.
+	priorCount := 0
+	if priorIncidents, err := index.LoadAllJSONLShards(modCfg.OutputDir); err != nil {
+		log.Printf("[sync][%s] load prior shards: %v (proceeding without prior state)", modName, err)
+	} else if len(priorIncidents) > 0 {
+		priorCount = len(priorIncidents)
+		log.Printf("[sync][%s] loaded %d prior incidents from disk", modName, priorCount)
+		incidents = append(priorIncidents, incidents...)
+	}
+
+	// MergeAll uses union-find bucketing by every package/campaign/IOC key,
+	// so it's near-linear even on the 490k bulk-load case. We merge BEFORE
+	// canonicalization so a source-prefixed record and its already-canonical
+	// prior version dedup via shared CVE_ID / package keys, not by ID.
+	log.Printf("[sync][%s] MergeAll: merging %d incidents", modName, len(incidents))
+	mergeStart := time.Now()
+	incidents = incident.MergeAll(incidents)
+	assignCanonicalIDs(incidents, modName, e.sigmaReg)
+	log.Printf("[sync][%s] MergeAll: done in %s (%d after merge)", modName, time.Since(mergeStart).Round(time.Second), len(incidents))
+
+	// Actor attribution — O(incidents × actors), ~5s for 490k × 174.
+	if e.actorStore != nil {
+		attrStart := time.Now()
+		incidents = actor.Attribute(incidents, e.actorStore, modName)
+		log.Printf("[sync][%s] actor.Attribute: done in %s", modName, time.Since(attrStart).Round(time.Second))
+	}
+
+	// Persist the full merged incident set as the authoritative haul data.
+	// Belt-and-braces shrink guard: refuse to persist if the post-merge set
+	// lost more than half of what was on disk (bypass with --allow-shrink).
+	if !syncDryRun {
+		if priorCount > 1000 && len(incidents)*2 < priorCount && !syncAllowShrink {
+			log.Printf("[sync][%s] REFUSING PERSIST: merged set (%d) is <50%% of prior on-disk (%d). "+
+				"This usually means a source went silent or a since-window regressed. "+
+				"Re-run with --allow-shrink if this is intentional.",
+				modName, len(incidents), priorCount)
+		} else {
+			persistStart := time.Now()
+			if err := index.WriteAllJSONLShards(incidents, modCfg.OutputDir); err != nil {
+				log.Printf("[sync][%s] persist all.jsonl: %v", modName, err)
+			}
+			if err := index.WriteByPackageLookup(incidents, modCfg.OutputDir); err != nil {
+				log.Printf("[sync][%s] persist by-package: %v", modName, err)
+			}
+			if err := index.WriteByCVELookup(modName, incidents, modCfg.OutputDir); err != nil {
+				log.Printf("[sync][%s] persist by-cve: %v", modName, err)
+			}
+			if err := index.WriteCuratedIndex(modName, incidents, modCfg.OutputDir); err != nil {
+				log.Printf("[sync][%s] persist index.json: %v", modName, err)
+			}
+			log.Printf("[sync][%s] persist: done in %s", modName, time.Since(persistStart).Round(time.Second))
+		}
+	}
+
+	e.moduleIncidents[modName] = incidents
+	e.moduleFetchErrors[modName] = fetchErrCount
+}
+
+// crossModuleDedup removes incidents shared across modules (keeping the
+// highest-priority copy) and re-persists any module whose set changed.
+//
+// Priority: supply > malware > ransomware > cve > container — supply/malware/
+// ransomware are most actionable; cve/container records are encyclopedic.
+func (e *SyncEngine) crossModuleDedup() {
+	if syncDryRun {
+		return
+	}
+	dedupAcrossModules(e.moduleIncidents, []string{"supply", "malware", "ransomware", "cve", "container", "os-packages"})
+	for _, modName := range e.moduleNames {
+		modCfg, ok := e.cfg.Modules[modName]
+		if !ok {
+			continue
+		}
+		incidents := e.moduleIncidents[modName]
+		if err := index.WriteAllJSONLShards(incidents, modCfg.OutputDir); err != nil {
+			log.Printf("[sync][%s] dedup re-persist shards: %v", modName, err)
+		}
+		if err := index.WriteByPackageLookup(incidents, modCfg.OutputDir); err != nil {
+			log.Printf("[sync][%s] dedup re-persist package lookup: %v", modName, err)
+		}
+		if err := index.WriteByCVELookup(modName, incidents, modCfg.OutputDir); err != nil {
+			log.Printf("[sync][%s] dedup re-persist cve lookup: %v", modName, err)
+		}
+		if err := index.WriteCuratedIndex(modName, incidents, modCfg.OutputDir); err != nil {
+			log.Printf("[sync][%s] dedup re-persist curated index: %v", modName, err)
+		}
+	}
+}
+
+// fetchBlogs fetches multi-domain blog sources and routes posts into per-module
+// draft queues. Persists the multi-domain cursor on success.
+func (e *SyncEngine) fetchBlogs(ctx context.Context) {
+	if len(e.cfg.MultiDomainSources) == 0 {
+		return
+	}
+	var mdSince time.Time
+	if e.sinceOverride != nil {
+		mdSince = *e.sinceOverride
+	} else if src := e.st.Sources["__multidomain__"]; src.LastSync != nil {
+		mdSince = *src.LastSync
+	} else {
+		mdSince = e.st.LastSync
+	}
+
+	for name, mdCfg := range e.cfg.MultiDomainSources {
+		fetcher := multidomain.GetFetcher(name)
+		if fetcher == nil {
+			log.Printf("[sync] no fetcher registered for multi-domain source %q", name)
+			continue
+		}
+		log.Printf("[sync] fetching multi-domain source %s since %s", name, mdSince.Format(time.RFC3339))
+		mdCtx, mdCancel := context.WithTimeout(ctx, 2*time.Minute)
+		posts, err := fetcher.FetchPosts(mdCtx, mdSince)
+		mdCancel()
+		if err != nil {
+			log.Printf("[sync] %s: %v (skipping)", name, err)
+			continue
+		}
+		router := multidomain.New(mdCfg)
+		for _, post := range posts {
+			for _, modName := range router.Route(post) {
+				inc := convertPostToIncident(post, modName, name)
+				e.moduleDrafts[modName] = append(e.moduleDrafts[modName], inc)
+				log.Printf("[sync][%s] routed %s post: %s", modName, name, post.Title)
+			}
+		}
+	}
+
+	if !syncDryRun && e.sinceOverride == nil {
+		now := time.Now().UTC()
+		if e.st.Sources == nil {
+			e.st.Sources = make(map[string]state.SourceState)
+		}
+		src := e.st.Sources["__multidomain__"]
+		src.LastSync = &now
+		e.st.Sources["__multidomain__"] = src
+		if err := e.stateMgr.Save(filepath.Join(dataDir(), "state/last_sync.json"), e.st); err != nil {
+			log.Printf("[sync][multidomain] save state: %v", err)
+		}
+	}
+}
+
+// generateModule generates sigma rules and IOC feeds for one module's incidents,
+// writes blog drafts, and persists the per-module cursor.
+func (e *SyncEngine) generateModule(ctx context.Context, modName string, modCfg config.ModuleConfig) {
+	_ = ctx // available for future use by generation backends
+	incidents := e.moduleIncidents[modName]
+
+	// v0.1.11 routing: per-incident sigma rules go under --rules-root when set, otherwise inline.
+	sigmaOutDir := filepath.Join(moduleRulesDir(syncRulesRoot, modCfg.OutputDir), "sigma")
+	feedsDir := filepath.Join(modCfg.OutputDir, "feeds")
+	// Wipe stale Sigma files only on --backfill (full historical re-ingestion).
+	// Incremental syncs must not wipe rules generated from earlier windows.
+	if !syncDryRun && syncBackfill {
+		_ = os.RemoveAll(sigmaOutDir)
+	}
+	gen := sigma.New(sigmaOutDir, modName, e.sigmaReg)
+
+	genStart := time.Now()
+	log.Printf("[sync][%s] generating rules + IOC feeds for %d incidents", modName, len(incidents))
+
+	// Decide which incidents get sigma rules: same IsCurated predicate + cap
+	// that governs STIX bundles and index.json. Apply cap only when rules
+	// co-locate with intel in haul; uncapped under --rules-root (split mode).
+	applyCap := syncRulesRoot == ""
+	sigmaSet := buildSigmaEligibleSet(modName, incidents, applyCap)
+	if applyCap {
+		log.Printf("[sync][%s] sigma eligibility: %d of %d incidents qualify (curated, capped at %d)",
+			modName, len(sigmaSet), len(incidents), index.CuratedCapFor(modName))
+	} else {
+		log.Printf("[sync][%s] sigma eligibility: %d of %d incidents qualify (curated, uncapped — split mode)",
+			modName, len(sigmaSet), len(incidents))
+	}
+
+	// Parallel sigma + IOC generation — sigma.Registry is mutex-protected so
+	// concurrent gen.Generate() calls are safe.
+	workers := runtime.NumCPU()
+	if workers > 8 {
+		workers = 8
+	}
+	if workers > len(incidents) {
+		workers = len(incidents)
+	}
+	if workers < 1 {
+		workers = 1
+	}
+
+	var (
+		processed         atomic.Int64
+		skippedTier4      atomic.Int64
+		skippedNonCurated atomic.Int64
+		genWG             sync.WaitGroup
+		incidentsChan     = make(chan *incident.Incident, workers*2)
+	)
+
+	progressDone := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		lastReported := int64(0)
+		for {
+			select {
+			case <-progressDone:
+				return
+			case <-ticker.C:
+				n := processed.Load()
+				if n-lastReported >= 20_000 || (n > 0 && lastReported == 0) {
+					log.Printf("[sync][%s] generate progress: %d/%d (%s elapsed)",
+						modName, n, len(incidents), time.Since(genStart).Round(time.Second))
+					lastReported = n
+				}
+			}
+		}
+	}()
+
+	for w := 0; w < workers; w++ {
+		genWG.Add(1)
+		go func() {
+			defer genWG.Done()
+			for inc := range incidentsChan {
+				processed.Add(1)
+				if syncDryRun {
+					log.Printf("[sync][%s] dry-run: would generate rules for %s", modName, inc.ID)
+					continue
+				}
+				// Tier-4 container records have no actionable indicators — skip sigma+IOC.
+				if inc.ContainerExt != nil && inc.ContainerExt.Tier == 4 {
+					skippedTier4.Add(1)
+					continue
+				}
+				if sigmaSet[inc.ID] {
+					if err := gen.Generate(inc); err != nil {
+						log.Printf("[sync][%s] generate %s: %v", modName, inc.ID, err)
+					}
+				} else {
+					skippedNonCurated.Add(1)
+				}
+				if inc.ContainerExt != nil {
+					if err := e.iocExp.ExportContainerImages(inc, feedsDir); err != nil {
+						log.Printf("[sync][%s] container export %s: %v", modName, inc.ID, err)
+					}
+				} else {
+					if err := e.iocExp.Export(inc, feedsDir); err != nil {
+						log.Printf("[sync][%s] ioc export %s: %v", modName, inc.ID, err)
+					}
+				}
+			}
+		}()
+	}
+	for _, inc := range incidents {
+		incidentsChan <- inc
+	}
+	close(incidentsChan)
+	genWG.Wait()
+	close(progressDone)
+
+	if t4 := skippedTier4.Load(); t4 > 0 {
+		log.Printf("[sync][%s] skipped sigma+IOC for %d Tier-4 informational records", modName, t4)
+	}
+	if nc := skippedNonCurated.Load(); nc > 0 {
+		log.Printf("[sync][%s] skipped sigma (kept IOC) for %d non-curated records", modName, nc)
+	}
+	log.Printf("[sync][%s] generate: done in %s", modName, time.Since(genStart).Round(time.Second))
+
+	// Write multi-domain blog posts as draft YAMLs for human triage. Only
+	// write drafts that carry at least one technical signal.
+	if drafts := e.moduleDrafts[modName]; len(drafts) > 0 {
+		var signalDrafts []*incident.Incident
+		for _, d := range drafts {
+			ind := d.Indicators
+			hasSignal := len(d.Packages) > 0 ||
+				len(ind.Domains) > 0 ||
+				len(ind.IPs) > 0 ||
+				len(ind.URLs) > 0 ||
+				len(ind.FileHashes) > 0 ||
+				len(ind.FileNames) > 0 ||
+				len(ind.FilePaths) > 0 ||
+				ind.GitIndicators != nil ||
+				ind.CredentialTargets != nil
+			if hasSignal {
+				signalDrafts = append(signalDrafts, d)
+			}
+		}
+		if len(signalDrafts) > 0 {
+			draftsDir := filepath.Join(modCfg.OutputDir, "incidents", "drafts")
+			if err := writeDraftIncidents(draftsDir, signalDrafts, syncDryRun, modName); err != nil {
+				log.Printf("[sync][%s] write drafts: %v", modName, err)
+			}
+		}
+	}
+
+	// Persist per-module cursor. Skip when any source errored — re-fetching
+	// from the old cursor on the next run is safer than skipping the window.
+	if !syncDryRun && e.sinceOverride == nil && e.moduleFetchErrors[modName] == 0 {
+		now := time.Now().UTC()
+		if e.st.Sources == nil {
+			e.st.Sources = make(map[string]state.SourceState)
+		}
+		src := e.st.Sources[modName]
+		src.LastSync = &now
+		e.st.Sources[modName] = src
+		if err := e.stateMgr.Save(filepath.Join(dataDir(), "state/last_sync.json"), e.st); err != nil {
+			log.Printf("[sync][%s] save state: %v", modName, err)
+		}
+	}
+}
+
+// persistState saves the sigma registry, actor profiles, and final state file.
+func (e *SyncEngine) persistState() error {
+	if !syncDryRun {
+		if err := e.sigmaReg.Save(); err != nil {
+			log.Printf("[sync] sigma registry save: %v", err)
+		}
+	}
+
+	if syncDryRun {
+		log.Printf("[sync] dry-run complete — no state updated")
+		return nil
+	}
+
+	if e.actorStore != nil {
+		if err := e.actorStore.WriteProfiles(filepath.Join(dataDir(), "actors/profiles")); err != nil {
+			log.Printf("[sync] write actor profiles: %v", err)
+		} else {
+			withIncidents := 0
+			for _, p := range e.actorStore.Profiles() {
+				if len(p.LinkedIncidents) > 0 {
+					withIncidents++
+				}
+			}
+			log.Printf("[sync] actor profiles: %d total, %d with linked incidents",
+				len(e.actorStore.Profiles()), withIncidents)
+		}
+	}
+
+	// Note: we don't touch st.LastSync here. It exists for backwards
+	// compatibility with state files written by older versions, but new
+	// state writes only update the per-module cursor in st.Sources.
+	// Cross-module fallback caused supply → malware silent-zero on first runs.
+	return e.stateMgr.Save(filepath.Join(dataDir(), "state/last_sync.json"), e.st)
+}
+
+func runSync(_ *cobra.Command, _ []string) error {
+	eng := newSyncEngine()
+	if err := eng.loadConfig(); err != nil {
+		return err
+	}
+	eng.loadPopularData()
+
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
 
 	// Watchdog: hard os.Exit if the entire sync hasn't completed within
-	// hardWallClockBudget. This is the absolute escape hatch when the
-	// per-source ctx, the allSourcesDeadline, and the heartbeat all somehow
-	// fail to bail us out — observed once on the first haul sync where the
-	// engine produced no output for 30min before the workflow killed it.
+	// hardWallClockBudget. Absolute escape hatch when per-source ctx and
+	// allSourcesDeadline both somehow fail to bail out.
 	syncDoneWatchdog := make(chan struct{})
 	defer close(syncDoneWatchdog)
 	go func() {
@@ -192,651 +802,40 @@ func runSync(_ *cobra.Command, _ []string) error {
 		}
 	}()
 
-	iocExp := ioc.New()
-
-	// Load the shared Dragnet ID registry up front so we can assign canonical
-	// dragnet-{module}-{year}-{seq} IDs at ingest time, not at sigma-gen
-	// time. This unifies the previously-split ID schemes (source-prefixed
-	// ingest IDs vs registry-assigned sigma display IDs) — every incident
-	// now carries the same canonical ID end-to-end, and the source-prefixed
-	// one is preserved in LegacyID for traceability.
-	sigmaReg, regErr := sigma.LoadRegistry(filepath.Join(dataDir(), "state/sigma-id-registry.json"))
-	if regErr != nil {
-		log.Printf("[sync] sigma registry load failed (starting fresh): %v", regErr)
-		sigmaReg, _ = sigma.LoadRegistry("/dev/null")
+	if err := eng.initRegistries(ctx); err != nil {
+		return err
 	}
 
-	// Seed supply-chain actor profiles to disk (no-op if already present).
-	// Must run before WriteProfiles so seeds persist to haul on first run.
-	if err := actor.SeedProfiles(filepath.Join(dataDir(), "actors/profiles")); err != nil {
-		log.Printf("[sync] actor seed: %v", err)
-	}
-
-	// ATT&CK actor store — fetched once, used by all modules for attribution.
-	// Falls back to on-disk profiles when the bundle hasn't changed (ETag match).
-	actorStore, newMITREETag := loadActorStore(ctx, st.MITREETag)
-	if newMITREETag != "" {
-		st.MITREETag = newMITREETag
-	}
-	// Merge embedded supply-chain seeds into the in-memory store so they
-	// participate in attribution even when MITRE returned a fresh bundle.
-	if actorStore != nil {
-		actor.ApplySeeds(actorStore)
-		stix.SetActorStore(actorStore)
-	}
-
-	// Per-module source polling.
-	moduleIncidents := map[string][]*incident.Incident{}
-	moduleFetchErrors := map[string]int32{} // non-zero means at least one source failed
-
-	for _, modName := range moduleNames {
-		modCfg, ok := cfg.Modules[modName]
+	for _, modName := range eng.moduleNames {
+		modCfg, ok := eng.cfg.Modules[modName]
 		if !ok {
-			if explicitModule {
+			if eng.explicitModule {
 				return fmt.Errorf("unknown module %q", modName)
 			}
 			log.Printf("[sync] skipping module %q (not configured in dragnet.yaml)", modName)
 			continue
 		}
-
-		// Resolve the since timestamp for this module.
-		// Priority: explicit --since > per-module cursor > zero (first-run bulk).
-		//
-		// We deliberately do NOT fall back to st.LastSync here. The previous
-		// fallback caused cross-pollution between modules when they were run
-		// back-to-back in the same workflow: sync supply would set the global
-		// cursor to now, then sync malware would inherit it and fetch nothing.
-		// Per-module cursors are per-module; a brand-new module should start
-		// with a full backfill, not silently inherit another module's cursor.
-		var since time.Time
-		if sinceOverride != nil {
-			since = *sinceOverride
-		} else if src := st.Sources[modName]; src.LastSync != nil {
-			since = *src.LastSync
+		since := eng.sinceFor(modName)
+		incs, fetchErrCount, err := eng.fetchModule(ctx, modName, modCfg, since)
+		if err != nil {
+			return err
 		}
-
-		var srcs []sources.Source
-		switch {
-		case syncSources == "all":
-			srcs = sources.All()
-		case syncSources != "":
-			var err error
-			srcs, err = sources.ByName(strings.Split(syncSources, ","))
-			if err != nil {
-				return err
-			}
-		default:
-			var err error
-			srcs, err = sources.ForModule(modCfg.Sources)
-			if err != nil {
-				return err
-			}
-		}
-
-		if syncBackfill {
-			var filtered []sources.Source
-			for _, s := range srcs {
-				if !backfillSkip[s.Name()] {
-					filtered = append(filtered, s)
-				}
-			}
-			srcs = filtered
-		}
-
-		var (
-			mu            sync.Mutex
-			incidents     []*incident.Incident
-			fetchErrCount int32
-			wg            sync.WaitGroup
-			pending       sync.Map // src.Name() -> startTime for any source still running
-			// Per-source results captured so we can print a single-line health
-			// summary at the end of the module. Without it, silent failures
-			// (source returns 0 with no error) are buried in 100s of log lines.
-			srcStats sync.Map // src.Name() -> srcResult
-		)
-		sem := make(chan struct{}, 10)
-		for _, src := range srcs {
-			wg.Add(1)
-			go func(s sources.Source) {
-				defer wg.Done()
-				sem <- struct{}{}
-				defer func() { <-sem }()
-				start := time.Now()
-				pending.Store(s.Name(), start)
-				defer pending.Delete(s.Name())
-				log.Printf("[sync][%s] fetching %s since %s", modName, s.Name(), since.Format(time.RFC3339))
-				fetchCtx, fetchCancel := context.WithTimeout(ctx, perSourceFetchTimeout)
-				got, err := s.Fetch(fetchCtx, since)
-				fetchCancel()
-				dur := time.Since(start).Round(time.Millisecond)
-				if err != nil {
-					log.Printf("[sync][%s] %s: %v (skipping after %s)", modName, s.Name(), err, dur)
-					atomic.AddInt32(&fetchErrCount, 1)
-					srcStats.Store(s.Name(), srcResult{count: 0, err: err.Error()})
-					return
-				}
-				log.Printf("[sync][%s] %s: fetched %d incidents in %s", modName, s.Name(), len(got), dur)
-				srcStats.Store(s.Name(), srcResult{count: len(got)})
-				// Stamp source name on any incident the client forgot to set it on.
-				for _, inc := range got {
-					if inc.Source == "" {
-						inc.Source = s.Name()
-					}
-				}
-				mu.Lock()
-				incidents = append(incidents, got...)
-				mu.Unlock()
-			}(src)
-		}
-
-		// Wait for fetches with three layers of safety:
-		//   1. heartbeat — log every 30s which sources are still running so a
-		//      stuck run is visible from CI logs immediately, not on cancel.
-		//   2. allSourcesDeadline — bail out at 5min, abandon stuck goroutines.
-		//   3. hardWallClockBudget watchdog (separate goroutine started above)
-		//      os.Exit()s the whole binary at 20min, regardless.
-		// Layer 2 alone proved unreliable on the first haul sync (silence for
-		// 30min before the workflow killed it) — possibly runtime starvation
-		// under heavy GC after big slice appends.
-		done := make(chan struct{})
-		go func() { wg.Wait(); close(done) }()
-		heartbeat := time.NewTicker(fetchHeartbeatInterval)
-		deadline := time.After(allSourcesDeadline)
-	waitLoop:
-		for {
-			select {
-			case <-done:
-				heartbeat.Stop()
-				break waitLoop
-			case <-deadline:
-				heartbeat.Stop()
-				var stuck []string
-				now := time.Now()
-				pending.Range(func(k, v any) bool {
-					stuck = append(stuck, fmt.Sprintf("%s(%s)", k.(string), now.Sub(v.(time.Time)).Round(time.Second)))
-					return true
-				})
-				log.Printf("[sync][%s] hit %s deadline; abandoning %d source(s) still running: %s",
-					modName, allSourcesDeadline, len(stuck), strings.Join(stuck, ", "))
-				atomic.AddInt32(&fetchErrCount, int32(len(stuck)))
-				break waitLoop
-			case <-heartbeat.C:
-				var pendingNames []string
-				now := time.Now()
-				pending.Range(func(k, v any) bool {
-					pendingNames = append(pendingNames, fmt.Sprintf("%s(%s)", k.(string), now.Sub(v.(time.Time)).Round(time.Second)))
-					return true
-				})
-				log.Printf("[sync][%s] heartbeat: %d source(s) still running: %s",
-					modName, len(pendingNames), strings.Join(pendingNames, ", "))
-			}
-		}
-
-		// Source-health summary: a single line that makes silent zero-return
-		// failures visible without grepping the per-source lines above.
-		logSourceHealth(modName, &srcStats)
-
-		// OSV package enrichment for the supply module.
-		//
-		// IMPORTANT: skip when the bulk OSV path was taken (since > 7 days).
-		// Bulk export already returned every OSV advisory; enriching would
-		// then issue thousands of additional /querybatch HTTP calls in series
-		// for duplicate data and burn 5-20+ minutes silently. The bulk cutoff
-		// here mirrors osv.bulkCutoff inside the OSV client.
-		const osvBulkCutoff = 7 * 24 * time.Hour
-		if modName == "supply" && time.Since(since) <= osvBulkCutoff {
-			var pkgsToEnrich []incident.Package
-			seen := map[string]bool{}
-			for _, inc := range incidents {
-				for _, pkg := range inc.Packages {
-					key := pkg.Ecosystem + "/" + pkg.Name + "@" + strings.Join(pkg.AffectedVersions, ",")
-					if !seen[key] {
-						seen[key] = true
-						pkgsToEnrich = append(pkgsToEnrich, pkg)
-					}
-				}
-			}
-			if len(pkgsToEnrich) > 0 {
-				log.Printf("[sync][%s] osv enrich: starting with %d unique packages", modName, len(pkgsToEnrich))
-				osvClient := osv.New()
-				enrichStart := time.Now()
-				enriched, err := osvClient.EnrichPackages(ctx, pkgsToEnrich)
-				if err != nil {
-					log.Printf("[sync][%s] osv enrich: %v (skipping after %s)", modName, err, time.Since(enrichStart).Round(time.Second))
-				} else if len(enriched) > 0 {
-					log.Printf("[sync][%s] osv enrich: %d additional advisories in %s", modName, len(enriched), time.Since(enrichStart).Round(time.Second))
-					incidents = append(incidents, enriched...)
-				}
-			}
-		} else if modName == "supply" {
-			log.Printf("[sync][%s] osv enrich: skipped (bulk fetch already included full advisory set)", modName)
-		}
-
-		// Supply enrichment is now local-only (no HTTP calls — uses the
-		// popular-packages snapshot in popularByEco), so it's safe even for
-		// the bulk path's 264k+ incidents.
-		if modName == "supply" {
-			log.Printf("[sync][%s] enrichSupplyIncidents: %d incidents", modName, len(incidents))
-			stepStart := time.Now()
-			incidents = enrichSupplyIncidents(ctx, incidents, popularByEco)
-			log.Printf("[sync][%s] enrichSupplyIncidents: done in %s", modName, time.Since(stepStart).Round(time.Second))
-		}
-
-		if modName == "container" {
-			incidents = enrichContainerIncidents(incidents, popularImages, cfg.Modules["container"])
-		}
-
-		if modName == "cve" {
-			before := len(incidents)
-			incidents = filterCVEByQuality(incidents)
-			log.Printf("[sync][%s] CVE quality filter: %d -> %d (kept KEV / CVSS>=9 / public PoC)", modName, before, len(incidents))
-		}
-
-		if modName == "os-packages" {
-			before := len(incidents)
-			incidents = filterOSPackages(incidents, filepath.Join(dataDir(), "state"))
-			log.Printf("[sync][%s] OS package filter: %d -> %d (high/critical, fix or KEV)", modName, before, len(incidents))
-		}
-
-		// Load whatever is already on disk and fold it into the fetched set
-		// before MergeAll. Without this, each cycle's persist call wipes any
-		// incident that wasn't refreshed within the current `since` window —
-		// supply collapsed from 264k → 0 and ransomware from 30k → 3 in a
-		// single cron tick because most sources legitimately return nothing
-		// new in 6 hours. MergeAll is union-find dedupe so re-feeding the
-		// prior set is idempotent.
-		priorCount := 0
-		if priorIncidents, err := index.LoadAllJSONLShards(modCfg.OutputDir); err != nil {
-			log.Printf("[sync][%s] load prior shards: %v (proceeding without prior state)", modName, err)
-		} else if len(priorIncidents) > 0 {
-			priorCount = len(priorIncidents)
-			log.Printf("[sync][%s] loaded %d prior incidents from disk", modName, priorCount)
-			incidents = append(priorIncidents, incidents...)
-		}
-
-		// MergeAll uses union-find bucketing by every package/campaign/IOC key,
-		// so it's near-linear even on the 490k bulk-load case. No skip needed.
-		// We merge BEFORE canonicalization so that a source-prefixed record
-		// fetched this cycle and its already-canonical prior version dedup
-		// via shared CVE_ID / package keys, not by ID. After merge, the
-		// surviving record has whichever ID was first in the input slice
-		// (prior, since we appended fetched after) — we canonicalize next.
-		log.Printf("[sync][%s] MergeAll: merging %d incidents", modName, len(incidents))
-		mergeStart := time.Now()
-		incidents = incident.MergeAll(incidents)
-
-		// Assign canonical IDs via the shared registry AFTER merge so the
-		// surviving record gets canonicalized regardless of which input
-		// slice (fetched or prior) contributed its ID. Idempotent — records
-		// already in dragnet- form pass through untouched.
-		assignCanonicalIDs(incidents, modName, sigmaReg)
-		log.Printf("[sync][%s] MergeAll: done in %s (%d after merge)", modName, time.Since(mergeStart).Round(time.Second), len(incidents))
-
-		// Actor attribution — O(incidents × actors), ~5s for 490k × 174.
-		if actorStore != nil {
-			attrStart := time.Now()
-			incidents = actor.Attribute(incidents, actorStore, modName)
-			log.Printf("[sync][%s] actor.Attribute: done in %s", modName, time.Since(attrStart).Round(time.Second))
-		}
-
-		// Persist the full merged incident set as the authoritative haul data:
-		//   {module}/incidents/all/{shard}.jsonl   — every incident, sharded by ID prefix
-		//   {module}/incidents/index.json          — curated subset for port's listing
-		//   {module}/lookup/by-package.json        — ecosystem/name -> incidents lookup
-		// port/buoy/scope/trawl all consume these. Generate's STIX/sigma compilation
-		// reads all.jsonl when on-disk YAMLs are absent.
-		if !syncDryRun {
-			// Belt-and-braces against future regressions of the prior-load fix
-			// above: refuse to persist if the post-merge set lost more than
-			// half of what was on disk. Bypass with --allow-shrink for
-			// intentional purges. Only triggers when there was meaningful
-			// prior state (>1000) so first-run / small modules aren't blocked.
-			if priorCount > 1000 && len(incidents)*2 < priorCount && !syncAllowShrink {
-				log.Printf("[sync][%s] REFUSING PERSIST: merged set (%d) is <50%% of prior on-disk (%d). "+
-					"This usually means a source went silent or a since-window regressed. "+
-					"Re-run with --allow-shrink if this is intentional.",
-					modName, len(incidents), priorCount)
-			} else {
-				persistStart := time.Now()
-				if err := index.WriteAllJSONLShards(incidents, modCfg.OutputDir); err != nil {
-					log.Printf("[sync][%s] persist all.jsonl: %v", modName, err)
-				}
-				if err := index.WriteByPackageLookup(incidents, modCfg.OutputDir); err != nil {
-					log.Printf("[sync][%s] persist by-package: %v", modName, err)
-				}
-				if err := index.WriteByCVELookup(modName, incidents, modCfg.OutputDir); err != nil {
-					log.Printf("[sync][%s] persist by-cve: %v", modName, err)
-				}
-				if err := index.WriteCuratedIndex(modName, incidents, modCfg.OutputDir); err != nil {
-					log.Printf("[sync][%s] persist index.json: %v", modName, err)
-				}
-				log.Printf("[sync][%s] persist: done in %s", modName, time.Since(persistStart).Round(time.Second))
-			}
-		}
-
-		moduleIncidents[modName] = incidents
-		moduleFetchErrors[modName] = atomic.LoadInt32(&fetchErrCount)
+		incs = eng.enrichModule(ctx, modName, since, modCfg, incs)
+		eng.mergeAndPersistModule(modName, modCfg, incs, fetchErrCount)
 	}
 
-	// Cross-module dedup pass. Per-module MergeAll only sees its own module's
-	// incidents, so a CVE that ships in both cve (NVD-driven) and container
-	// (Trivy-driven CISA enrichment) survives as two records. v0.1.10's
-	// container CISA filter drops most of these, but anything that slips
-	// through gets caught here. Priority: supply > malware > ransomware > cve
-	// > container — supply/malware/ransomware are the most actionable surfaces
-	// for downstream consumers, and cve/container records are encyclopedic by
-	// nature so they're cheapest to drop.
-	if !syncDryRun {
-		dedupAcrossModules(moduleIncidents, []string{"supply", "malware", "ransomware", "cve", "container", "os-packages"})
-		// Re-persist any module that lost records — writes are idempotent
-		// (wipe-then-write) so this just refreshes the on-disk shape.
-		for _, modName := range moduleNames {
-			modCfg, ok := cfg.Modules[modName]
-			if !ok {
-				continue
-			}
-			incidents := moduleIncidents[modName]
-			if err := index.WriteAllJSONLShards(incidents, modCfg.OutputDir); err != nil {
-				log.Printf("[sync][%s] dedup re-persist shards: %v", modName, err)
-			}
-			if err := index.WriteByPackageLookup(incidents, modCfg.OutputDir); err != nil {
-				log.Printf("[sync][%s] dedup re-persist package lookup: %v", modName, err)
-			}
-			if err := index.WriteByCVELookup(modName, incidents, modCfg.OutputDir); err != nil {
-				log.Printf("[sync][%s] dedup re-persist cve lookup: %v", modName, err)
-			}
-			if err := index.WriteCuratedIndex(modName, incidents, modCfg.OutputDir); err != nil {
-				log.Printf("[sync][%s] dedup re-persist curated index: %v", modName, err)
-			}
-		}
-	}
+	eng.crossModuleDedup()
+	eng.fetchBlogs(ctx)
 
-	// Multi-domain source routing — fetched once, routed to matching modules.
-	// Blog posts with no IOCs are written as draft YAMLs for human triage rather than
-	// fed into the Sigma generator (they produce empty rules with no detection criteria).
-	moduleDrafts := map[string][]*incident.Incident{}
-	if len(cfg.MultiDomainSources) > 0 {
-		// Resolve since for multi-domain — mirrors per-module priority chain.
-		var mdSince time.Time
-		if sinceOverride != nil {
-			mdSince = *sinceOverride
-		} else if src := st.Sources["__multidomain__"]; src.LastSync != nil {
-			mdSince = *src.LastSync
-		} else {
-			mdSince = st.LastSync
-		}
-
-		for name, mdCfg := range cfg.MultiDomainSources {
-			fetcher := multidomain.GetFetcher(name)
-			if fetcher == nil {
-				log.Printf("[sync] no fetcher registered for multi-domain source %q", name)
-				continue
-			}
-			log.Printf("[sync] fetching multi-domain source %s since %s", name, mdSince.Format(time.RFC3339))
-			mdCtx, mdCancel := context.WithTimeout(ctx, 2*time.Minute)
-			posts, err := fetcher.FetchPosts(mdCtx, mdSince)
-			mdCancel()
-			if err != nil {
-				log.Printf("[sync] %s: %v (skipping)", name, err)
-				continue
-			}
-			router := multidomain.New(mdCfg)
-			for _, post := range posts {
-				for _, modName := range router.Route(post) {
-					inc := convertPostToIncident(post, modName, name)
-					moduleDrafts[modName] = append(moduleDrafts[modName], inc)
-					log.Printf("[sync][%s] routed %s post: %s", modName, name, post.Title)
-				}
-			}
-		}
-
-		// Persist multi-domain cursor so reruns don't re-fetch already-processed posts.
-		if !syncDryRun && sinceOverride == nil {
-			now := time.Now().UTC()
-			if st.Sources == nil {
-				st.Sources = make(map[string]state.SourceState)
-			}
-			src := st.Sources["__multidomain__"]
-			src.LastSync = &now
-			st.Sources["__multidomain__"] = src
-			if err := stateMgr.Save(filepath.Join(dataDir(), "state/last_sync.json"), st); err != nil {
-				log.Printf("[sync][multidomain] save state: %v", err)
-			}
-		}
-	}
-
-	// sigmaReg was loaded above (now also used at ingest for canonical IDs).
-
-	// Generate rules + export IOCs per module.
-	for _, modName := range moduleNames {
-		incidents := moduleIncidents[modName]
-		modCfg, ok := cfg.Modules[modName]
+	for _, modName := range eng.moduleNames {
+		modCfg, ok := eng.cfg.Modules[modName]
 		if !ok {
 			continue
 		}
-
-		// v0.1.11 routing: per-incident sigma rules go under --rules-root when
-		// set, otherwise inline. Feeds always stay with the intel data (haul).
-		sigmaOutDir := filepath.Join(moduleRulesDir(syncRulesRoot, modCfg.OutputDir), "sigma")
-		feedsDir := filepath.Join(modCfg.OutputDir, "feeds")
-		// Wipe stale Sigma files only on --backfill (full historical re-ingestion).
-		// Incremental syncs fetch a time-window of incidents and must not wipe
-		// rules generated from earlier windows — those incidents aren't re-fetched.
-		if !syncDryRun && syncBackfill {
-			_ = os.RemoveAll(sigmaOutDir)
-		}
-		gen := sigma.New(sigmaOutDir, modName, sigmaReg)
-
-		genStart := time.Now()
-		log.Printf("[sync][%s] generating rules + IOC feeds for %d incidents", modName, len(incidents))
-
-		// Decide which incidents get sigma rules. Same predicate + cap that
-		// govern STIX bundles and index.json — IsCurated (severe / actor-
-		// linked / last 90 days) sorted by published-date desc, capped at
-		// CuratedIndexCap (5000 per module).
-		//
-		// Why: CVE module was generating 156k sigma rules (628 MB) and
-		// ransomware 112k (448 MB) from per-incident templates. We're a
-		// data hub, not a detection-rule TIP — rules are a useful side-
-		// artifact for the actionable subset, not a per-record obligation
-		// for tens of thousands of historical advisories. Curated-only
-		// brings each module down to ≤30k rules.
-		//
-		// IOC export still runs for all non-Tier-4 incidents below — IOC
-		// feeds want comprehensive coverage of every hash / domain / IP
-		// even from old or low-severity records.
-		// Apply the per-module curated cap only when rules live inline in
-		// haul. With --rules-root pointing at haul-rules (v0.1.11 split),
-		// rules don't compete with intel for git size — generate one for
-		// every curated incident.
-		applyCap := syncRulesRoot == ""
-		sigmaSet := buildSigmaEligibleSet(modName, incidents, applyCap)
-		if applyCap {
-			log.Printf("[sync][%s] sigma eligibility: %d of %d incidents qualify (curated, capped at %d)",
-				modName, len(sigmaSet), len(incidents), index.CuratedCapFor(modName))
-		} else {
-			log.Printf("[sync][%s] sigma eligibility: %d of %d incidents qualify (curated, uncapped — split mode)",
-				modName, len(sigmaSet), len(incidents))
-		}
-
-		// Parallel sigma + IOC generation across runtime.NumCPU() workers.
-		// The sigma.Registry is mutex-protected (see internal/sigma/registry.go),
-		// so concurrent gen.Generate() calls are safe — ID-assignment serialises
-		// inside the registry. Each worker does its own template render +
-		// file-write, which is the actual cost driver and parallelises cleanly.
-		workers := runtime.NumCPU()
-		if workers > 8 {
-			workers = 8
-		}
-		if workers > len(incidents) {
-			workers = len(incidents)
-		}
-		if workers < 1 {
-			workers = 1
-		}
-
-		var (
-			processed         atomic.Int64
-			skippedTier4      atomic.Int64
-			skippedNonCurated atomic.Int64
-			genWG             sync.WaitGroup
-			incidentsChan     = make(chan *incident.Incident, workers*2)
-		)
-
-		// Progress reporter — emits one line every ~20k records, no per-incident logs.
-		progressDone := make(chan struct{})
-		go func() {
-			ticker := time.NewTicker(30 * time.Second)
-			defer ticker.Stop()
-			lastReported := int64(0)
-			for {
-				select {
-				case <-progressDone:
-					return
-				case <-ticker.C:
-					n := processed.Load()
-					if n-lastReported >= 20_000 || (n > 0 && lastReported == 0) {
-						log.Printf("[sync][%s] generate progress: %d/%d (%s elapsed)",
-							modName, n, len(incidents), time.Since(genStart).Round(time.Second))
-						lastReported = n
-					}
-				}
-			}
-		}()
-
-		for w := 0; w < workers; w++ {
-			genWG.Add(1)
-			go func() {
-				defer genWG.Done()
-				for inc := range incidentsChan {
-					processed.Add(1)
-					if syncDryRun {
-						log.Printf("[sync][%s] dry-run: would generate rules for %s", modName, inc.ID)
-						continue
-					}
-					// Tier-4 container records skip BOTH sigma and IOC — they
-					// have no actionable indicators (just OS-package CVE
-					// metadata) and there's ~158k of them on a first sync.
-					if inc.ContainerExt != nil && inc.ContainerExt.Tier == 4 {
-						skippedTier4.Add(1)
-						continue
-					}
-					// Sigma rule generation is curated-only. IOC export still
-					// runs below for everything else.
-					if sigmaSet[inc.ID] {
-						if err := gen.Generate(inc); err != nil {
-							log.Printf("[sync][%s] generate %s: %v", modName, inc.ID, err)
-						}
-					} else {
-						skippedNonCurated.Add(1)
-					}
-					if inc.ContainerExt != nil {
-						if err := iocExp.ExportContainerImages(inc, feedsDir); err != nil {
-							log.Printf("[sync][%s] container export %s: %v", modName, inc.ID, err)
-						}
-					} else {
-						if err := iocExp.Export(inc, feedsDir); err != nil {
-							log.Printf("[sync][%s] ioc export %s: %v", modName, inc.ID, err)
-						}
-					}
-				}
-			}()
-		}
-		for _, inc := range incidents {
-			incidentsChan <- inc
-		}
-		close(incidentsChan)
-		genWG.Wait()
-		close(progressDone)
-
-		if t4 := skippedTier4.Load(); t4 > 0 {
-			log.Printf("[sync][%s] skipped sigma+IOC for %d Tier-4 informational records", modName, t4)
-		}
-		if nc := skippedNonCurated.Load(); nc > 0 {
-			log.Printf("[sync][%s] skipped sigma (kept IOC) for %d non-curated records", modName, nc)
-		}
-		log.Printf("[sync][%s] generate: done in %s", modName, time.Since(genStart).Round(time.Second))
-
-		// Write multi-domain blog posts as draft YAMLs for human triage.
-		// Only write drafts that have at least one technical signal — packages,
-		// network IOCs, file hashes, or file names. Posts with no signals are
-		// vendor marketing or general news; they will never yield actionable intel.
-		if drafts := moduleDrafts[modName]; len(drafts) > 0 {
-			var signalDrafts []*incident.Incident
-			for _, d := range drafts {
-				ind := d.Indicators
-				hasSignal := len(d.Packages) > 0 ||
-					len(ind.Domains) > 0 ||
-					len(ind.IPs) > 0 ||
-					len(ind.URLs) > 0 ||
-					len(ind.FileHashes) > 0 ||
-					len(ind.FileNames) > 0 ||
-					len(ind.FilePaths) > 0 ||
-					ind.GitIndicators != nil ||
-					ind.CredentialTargets != nil
-				if hasSignal {
-					signalDrafts = append(signalDrafts, d)
-				}
-			}
-			if len(signalDrafts) > 0 {
-				draftsDir := filepath.Join(modCfg.OutputDir, "incidents", "drafts")
-				if err := writeDraftIncidents(draftsDir, signalDrafts, syncDryRun, modName); err != nil {
-					log.Printf("[sync][%s] write drafts: %v", modName, err)
-				}
-			}
-		}
-
-		// Persist per-module cursor so subsequent module runs aren't skipped.
-		// Skip if any source returned an error — the window may be incomplete and
-		// re-fetching from the old cursor on the next run is safer than skipping it.
-		if !syncDryRun && sinceOverride == nil && moduleFetchErrors[modName] == 0 {
-			now := time.Now().UTC()
-			if st.Sources == nil {
-				st.Sources = make(map[string]state.SourceState)
-			}
-			src := st.Sources[modName]
-			src.LastSync = &now
-			st.Sources[modName] = src
-			if err := stateMgr.Save(filepath.Join(dataDir(), "state/last_sync.json"), st); err != nil {
-				log.Printf("[sync][%s] save state: %v", modName, err)
-			}
-		}
+		eng.generateModule(ctx, modName, modCfg)
 	}
 
-	// Save the Dragnet ID registry so sequential IDs persist across syncs.
-	if !syncDryRun {
-		if err := sigmaReg.Save(); err != nil {
-			log.Printf("[sync] sigma registry save: %v", err)
-		}
-	}
-
-	if syncDryRun {
-		log.Printf("[sync] dry-run complete — no state updated")
-		return nil
-	}
-
-	// Write actor profiles after all modules are attributed.
-	if actorStore != nil {
-		if err := actorStore.WriteProfiles(filepath.Join(dataDir(), "actors/profiles")); err != nil {
-			log.Printf("[sync] write actor profiles: %v", err)
-		} else {
-			withIncidents := 0
-			for _, p := range actorStore.Profiles() {
-				if len(p.LinkedIncidents) > 0 {
-					withIncidents++
-				}
-			}
-			log.Printf("[sync] actor profiles: %d total, %d with linked incidents",
-				len(actorStore.Profiles()), withIncidents)
-		}
-	}
-
-	// Note: we don't touch st.LastSync here. It exists for backwards
-	// compatibility with state files written by older versions, but new
-	// state writes only update the per-module cursor in st.Sources (see
-	// the per-module save above). Cross-module fallback caused supply →
-	// malware silent-zero on first runs.
-	return stateMgr.Save(filepath.Join(dataDir(), "state/last_sync.json"), st)
+	return eng.persistState()
 }
 
 // loadActorStore fetches the MITRE ATT&CK bundle (ETag-cached) and returns an

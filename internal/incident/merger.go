@@ -1,9 +1,10 @@
 package incident
 
 import (
-	"math"
 	"strings"
 	"time"
+
+	"github.com/dragnet-dev/dragnet/internal/confidence"
 )
 
 // Merge combines multiple incidents covering the same event into one.
@@ -321,13 +322,72 @@ func iocOverlapCount(a, b *Incident) int {
 	return count
 }
 
+func copyStrings(s []string) []string {
+	if s == nil {
+		return nil
+	}
+	out := make([]string, len(s))
+	copy(out, s)
+	return out
+}
+
+func copyExposure(e Exposure) Exposure {
+	return Exposure{
+		LockfileSignatures: copyStrings(e.LockfileSignatures),
+		FilePresence:       copyStrings(e.FilePresence),
+		IDEArtifacts:       copyStrings(e.IDEArtifacts),
+		Hooks:              copyStrings(e.Hooks),
+		GitDependencies:    copyStrings(e.GitDependencies),
+	}
+}
+
+// mergeIndicatorValues merges []IndicatorValue slices from all incidents in a
+// group. Sources are unioned, Confidence recalculated, and any IP or Domain
+// enrichment present on a secondary record is promoted to the merged entry if
+// the primary lacks it.
+func mergeIndicatorValues(group []*Incident, getSlice func(*Incident) []IndicatorValue, keyFn func(IndicatorValue) string) []IndicatorValue {
+	m := map[string]*IndicatorValue{}
+	for _, inc := range group {
+		for i := range getSlice(inc) {
+			v := getSlice(inc)[i]
+			key := keyFn(v)
+			if existing, ok := m[key]; ok {
+				existing.Sources = unionStrings(append(existing.Sources, v.Sources...))
+				existing.Confidence = confidence.Calculate(existing.Sources)
+				if existing.IPEnrich == nil && v.IPEnrich != nil {
+					existing.IPEnrich = v.IPEnrich
+				}
+				if existing.DomainEnrich == nil && v.DomainEnrich != nil {
+					existing.DomainEnrich = v.DomainEnrich
+				}
+			} else {
+				cp := v
+				m[key] = &cp
+			}
+		}
+	}
+	out := make([]IndicatorValue, 0, len(m))
+	for _, v := range m {
+		out = append(out, *v)
+	}
+	return out
+}
+
 // mergeGroup merges all incidents in a group into a single canonical incident.
 func mergeGroup(group []*Incident) *Incident {
 	if len(group) == 1 {
 		return group[0]
 	}
 
-	base := *group[0] // shallow copy of first
+	base := *group[0]
+	// Deep-copy slice-backed fields that mergeGroup doesn't fully rebuild,
+	// preventing shared backing arrays with the original incident record.
+	base.Exposure = copyExposure(group[0].Exposure)
+	base.DetectionTargets = copyStrings(group[0].DetectionTargets)
+	base.ActorIDs = copyStrings(group[0].ActorIDs)
+	base.CrossDomainSources = copyStrings(group[0].CrossDomainSources)
+	base.CrossDomainLinks = append([]CrossDomainLink(nil), group[0].CrossDomainLinks...)
+	base.DetectionRules = append([]DetectionRule(nil), group[0].DetectionRules...)
 	base.Packages = unionPackages(group)
 	base.References = unionStrings(collectReferences(group))
 	base.Severity = highestSeverity(group)
@@ -529,49 +589,18 @@ func longestDescription(group []*Incident) string {
 func mergeIndicators(group []*Incident) Indicators {
 	var out Indicators
 
-	// Domains
-	domainMap := map[string]*IndicatorValue{}
-	for _, inc := range group {
-		for _, d := range inc.Indicators.Domains {
-			key := strings.ToLower(d.Value)
-			if existing, ok := domainMap[key]; ok {
-				existing.Sources = unionStrings(append(existing.Sources, d.Sources...))
-				existing.Confidence = math.Min(calculateConfidence(existing.Sources), 0.98)
-			} else {
-				cp := d
-				domainMap[key] = &cp
-			}
-		}
-	}
-	for _, v := range domainMap {
-		out.Domains = append(out.Domains, *v)
-	}
+	out.Domains = mergeIndicatorValues(group, func(inc *Incident) []IndicatorValue { return inc.Indicators.Domains }, func(v IndicatorValue) string { return strings.ToLower(v.Value) })
+	out.IPs = mergeIndicatorValues(group, func(inc *Incident) []IndicatorValue { return inc.Indicators.IPs }, func(v IndicatorValue) string { return v.Value })
+	out.URLs = mergeIndicatorValues(group, func(inc *Incident) []IndicatorValue { return inc.Indicators.URLs }, func(v IndicatorValue) string { return strings.ToLower(v.Value) })
 
-	// IPs
-	ipMap := map[string]*IndicatorValue{}
-	for _, inc := range group {
-		for _, ip := range inc.Indicators.IPs {
-			if existing, ok := ipMap[ip.Value]; ok {
-				existing.Sources = unionStrings(append(existing.Sources, ip.Sources...))
-				existing.Confidence = math.Min(calculateConfidence(existing.Sources), 0.98)
-			} else {
-				cp := ip
-				ipMap[ip.Value] = &cp
-			}
-		}
-	}
-	for _, v := range ipMap {
-		out.IPs = append(out.IPs, *v)
-	}
-
-	// File hashes
+	// File hashes — different struct type; keyed by algorithm|value.
 	hashMap := map[string]*FileHash{}
 	for _, inc := range group {
 		for _, h := range inc.Indicators.FileHashes {
 			key := strings.ToLower(h.Algorithm + "|" + h.Value)
 			if existing, ok := hashMap[key]; ok {
 				existing.Sources = unionStrings(append(existing.Sources, h.Sources...))
-				existing.Confidence = math.Min(calculateConfidence(existing.Sources), 0.98)
+				existing.Confidence = confidence.Calculate(existing.Sources)
 			} else {
 				cp := h
 				hashMap[key] = &cp
@@ -580,24 +609,6 @@ func mergeIndicators(group []*Incident) Indicators {
 	}
 	for _, v := range hashMap {
 		out.FileHashes = append(out.FileHashes, *v)
-	}
-
-	// URLs
-	urlMap := map[string]*IndicatorValue{}
-	for _, inc := range group {
-		for _, u := range inc.Indicators.URLs {
-			key := strings.ToLower(u.Value)
-			if existing, ok := urlMap[key]; ok {
-				existing.Sources = unionStrings(append(existing.Sources, u.Sources...))
-				existing.Confidence = math.Min(calculateConfidence(existing.Sources), 0.98)
-			} else {
-				cp := u
-				urlMap[key] = &cp
-			}
-		}
-	}
-	for _, v := range urlMap {
-		out.URLs = append(out.URLs, *v)
 	}
 
 	// File names (union)
@@ -678,22 +689,3 @@ func collectFilePaths(group []*Incident) []string {
 	return all
 }
 
-// calculateConfidence is a local copy of the confidence calculation to avoid
-// an import cycle. The canonical implementation is in internal/confidence.
-func calculateConfidence(sources []string) float64 {
-	weights := map[string]float64{
-		"osv": 0.95, "ghsa": 0.95, "ossf": 0.85, "cisa": 0.90,
-		"wiz": 0.90, "socket": 0.90, "aikido": 0.80, "stepsecurity": 0.80,
-	}
-	if len(sources) == 0 {
-		return 0.30
-	}
-	max := 0.0
-	for _, s := range sources {
-		if w := weights[s]; w > max {
-			max = w
-		}
-	}
-	bonus := math.Min(float64(len(sources)-1)*0.08, 0.20)
-	return math.Min(max+bonus, 0.98)
-}
