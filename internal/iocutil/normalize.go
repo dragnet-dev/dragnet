@@ -12,8 +12,8 @@ import (
 )
 
 var (
-	reIP             = regexp.MustCompile(`\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b`)
-	reURLTrailing    = regexp.MustCompile(`\s+.*$`)
+	reIP          = regexp.MustCompile(`\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b`)
+	reURLTrailing = regexp.MustCompile(`\s+.*$`)
 )
 
 // Normalize cleans a raw IOC value (typically extracted from a blog post or

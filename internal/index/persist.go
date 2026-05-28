@@ -296,11 +296,20 @@ func WriteByCVELookup(module string, incidents []*incident.Incident, outputDir s
 		return err
 	}
 	dest := filepath.Join(dir, "by-cve.json")
-	data, err := json.Marshal(lookup)
+	f, err := os.Create(dest)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(dest, data, 0o644)
+	bw := bufio.NewWriterSize(f, 1<<17)
+	if encErr := json.NewEncoder(bw).Encode(lookup); encErr != nil {
+		f.Close()
+		return encErr
+	}
+	if flushErr := bw.Flush(); flushErr != nil {
+		f.Close()
+		return flushErr
+	}
+	return f.Close()
 }
 
 // ByPackageEntry is one record value in by-package.json. Rich enough that
@@ -350,11 +359,20 @@ func WriteByPackageLookup(incidents []*incident.Incident, outputDir string) erro
 	dest := filepath.Join(dir, "by-package.json")
 	// Minified — at 238k unique packages the file is ~40 MB pretty-printed
 	// for zero consumer benefit. Clients parse it once.
-	data, err := json.Marshal(lookup)
+	f, err := os.Create(dest)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(dest, data, 0o644)
+	bw := bufio.NewWriterSize(f, 1<<17)
+	if encErr := json.NewEncoder(bw).Encode(lookup); encErr != nil {
+		f.Close()
+		return encErr
+	}
+	if flushErr := bw.Flush(); flushErr != nil {
+		f.Close()
+		return flushErr
+	}
+	return f.Close()
 }
 
 // ─── helpers ──────────────────────────────────────────────────────────────
