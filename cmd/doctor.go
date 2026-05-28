@@ -19,7 +19,10 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 
 	"github.com/dragnet-dev/dragnet/internal/config"
 	"github.com/spf13/cobra"
@@ -37,14 +40,16 @@ var doctorCmd = &cobra.Command{
 }
 
 var (
-	doctorModule              string
-	doctorRoot                string
-	doctorRulesRoot           string
-	doctorSTIXRoot            string
-	doctorCompiledRoot        string
-	doctorBackends            string
-	doctorFixStaleRules       bool
-	doctorFailOnIOCViolations bool
+	doctorModule                string
+	doctorRoot                  string
+	doctorRulesRoot             string
+	doctorSTIXRoot              string
+	doctorCompiledRoot          string
+	doctorBackends              string
+	doctorFixStaleRules         bool
+	doctorFailOnIOCViolations   bool
+	doctorLintSigma             bool
+	doctorFailOnSigmaViolations bool
 )
 
 func init() {
@@ -71,6 +76,13 @@ func init() {
 		"Fail if any merged incident in incidents/all/*.jsonl has missing required fields or "+
 			"anomalously large IOC arrays (signs of a parsing error reaching the output). "+
 			"Use in CI to block corrupted haul commits.")
+	doctorCmd.Flags().BoolVar(&doctorLintSigma, "lint-sigma", false,
+		"Validate Sigma YAML structure for all generated rules in {module}/rules/sigma/. "+
+			"Checks required fields (title, id, status, detection, logsource), valid UUID id, "+
+			"valid status value, and a non-empty detection condition.")
+	doctorCmd.Flags().BoolVar(&doctorFailOnSigmaViolations, "fail-on-sigma-violations", false,
+		"Exit non-zero if --lint-sigma finds any structurally invalid Sigma rules. "+
+			"Use in CI to gate commits that include generated rules.")
 }
 
 // moduleReport captures everything we'll cross-check for one module.
@@ -135,6 +147,31 @@ func runDoctor(_ *cobra.Command, _ []string) error {
 			} else {
 				log.Printf("[doctor][%s][ioc-check] output IOC check passed", modName)
 			}
+		}
+	}
+
+	// Sigma rule lint: validate YAML structure of every generated rule in
+	// {module}/rules/sigma/. Gated behind --lint-sigma since it adds a few
+	// seconds on large hauls; --fail-on-sigma-violations gates CI commits.
+	if doctorLintSigma {
+		sigmaViolations := 0
+		for _, modName := range moduleNames {
+			outputDir := modName
+			if cfg != nil {
+				if mc, ok := cfg.Modules[modName]; ok && mc.OutputDir != "" {
+					outputDir = mc.OutputDir
+				}
+			}
+			modRoot := filepath.Join(doctorRoot, outputDir)
+			if v := lintSigmaRules(modName, modRoot); v > 0 {
+				log.Printf("[doctor][%s][sigma-lint] FAIL %d Sigma rule violation(s)", modName, v)
+				sigmaViolations += v
+			} else {
+				log.Printf("[doctor][%s][sigma-lint] all rules valid", modName)
+			}
+		}
+		if doctorFailOnSigmaViolations {
+			issues += sigmaViolations
 		}
 	}
 
@@ -675,4 +712,89 @@ func countLines(path string) int {
 		n++
 	}
 	return n
+}
+
+var (
+	uuidRe = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+
+	validSigmaStatuses = map[string]bool{
+		"stable":       true,
+		"test":         true,
+		"experimental": true,
+		"deprecated":   true,
+		"unsupported":  true,
+	}
+)
+
+// lintSigmaRules walks {modRoot}/rules/sigma/**/*.yaml and validates the
+// structural integrity of each file. Returns the violation count.
+// Run with --lint-sigma; gate CI with --fail-on-sigma-violations.
+func lintSigmaRules(modName, modRoot string) int {
+	sigmaRoot := filepath.Join(modRoot, "rules", "sigma")
+	violations := 0
+
+	_ = filepath.Walk(sigmaRoot, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info == nil || info.IsDir() {
+			return nil
+		}
+		if !strings.HasSuffix(info.Name(), ".yaml") {
+			return nil
+		}
+
+		data, err := os.ReadFile(path)
+		if err != nil {
+			log.Printf("[doctor][%s][sigma-lint] %s: read error: %v", modName, path, err)
+			violations++
+			return nil
+		}
+
+		var doc struct {
+			Title     string         `yaml:"title"`
+			ID        string         `yaml:"id"`
+			Status    string         `yaml:"status"`
+			Detection map[string]any `yaml:"detection"`
+			LogSource map[string]any `yaml:"logsource"`
+		}
+		if err := yaml.Unmarshal(data, &doc); err != nil {
+			log.Printf("[doctor][%s][sigma-lint] %s: YAML parse error: %v", modName, path, err)
+			violations++
+			return nil
+		}
+
+		rel, _ := filepath.Rel(sigmaRoot, path)
+
+		if doc.Title == "" {
+			log.Printf("[doctor][%s][sigma-lint] %s: missing 'title'", modName, rel)
+			violations++
+		}
+		if doc.ID == "" {
+			log.Printf("[doctor][%s][sigma-lint] %s: missing 'id'", modName, rel)
+			violations++
+		} else if !uuidRe.MatchString(doc.ID) {
+			log.Printf("[doctor][%s][sigma-lint] %s: 'id' is not a valid UUID: %q", modName, rel, doc.ID)
+			violations++
+		}
+		if doc.Status == "" {
+			log.Printf("[doctor][%s][sigma-lint] %s: missing 'status'", modName, rel)
+			violations++
+		} else if !validSigmaStatuses[doc.Status] {
+			log.Printf("[doctor][%s][sigma-lint] %s: invalid 'status' value: %q", modName, rel, doc.Status)
+			violations++
+		}
+		if len(doc.Detection) == 0 {
+			log.Printf("[doctor][%s][sigma-lint] %s: missing 'detection' block", modName, rel)
+			violations++
+		} else if _, ok := doc.Detection["condition"]; !ok {
+			log.Printf("[doctor][%s][sigma-lint] %s: 'detection' block has no 'condition' key", modName, rel)
+			violations++
+		}
+		if len(doc.LogSource) == 0 {
+			log.Printf("[doctor][%s][sigma-lint] %s: missing 'logsource' block", modName, rel)
+			violations++
+		}
+
+		return nil
+	})
+
+	return violations
 }
