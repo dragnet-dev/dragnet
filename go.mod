@@ -3,6 +3,7 @@ module github.com/dragnet-dev/dragnet
 go 1.26
 
 require (
+	github.com/BobuSumisu/aho-corasick v1.0.3
 	github.com/google/uuid v1.6.0
 	github.com/invopop/jsonschema v0.14.0
 	github.com/mmcdole/gofeed v1.3.0
@@ -10,12 +11,11 @@ require (
 	github.com/spf13/cobra v1.8.1
 	go.etcd.io/bbolt v1.4.3
 	golang.org/x/net v0.38.0
-	golang.org/x/sync v0.19.0
+	golang.org/x/sync v0.20.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
-	github.com/BobuSumisu/aho-corasick v1.0.3 // indirect
 	github.com/PuerkitoBio/goquery v1.8.0 // indirect
 	github.com/andybalholm/cascadia v1.3.1 // indirect
 	github.com/bahlo/generic-list-go v0.2.0 // indirect
